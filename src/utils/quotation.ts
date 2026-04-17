@@ -61,7 +61,7 @@ export function getDefaultQuotation(): QuotationData {
       contactLine: 'info@yourcompany.com | (555) 123-4567',
       footerText: 'Thank you for your business • Your Company Name • www.yourcompany.com',
       themeColor: '#1565c0',
-      logoDataUrl: '',
+      logoDataUrl: '/quotegen-logo.svg',
       letterheadDataUrl: '',
       useLetterhead: false,
     },

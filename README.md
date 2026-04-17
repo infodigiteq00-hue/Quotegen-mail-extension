@@ -1,3 +1,3 @@
-# Welcome to your Lovable project
+# QuoteGen
 
-TODO: Document your project here
+Quotation generator app for preparing client-ready quotes quickly.

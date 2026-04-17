@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import logoImg from '@/assets/logo.png';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -19,6 +18,7 @@ import { useToast } from '@/hooks/use-toast';
 
 const DEFAULT_SCOPE = 'default';
 const EMAIL_PAYLOAD_QUERY_KEY = 'email_payload';
+const APP_LOGO_SRC = '/quotegen-logo.svg';
 
 interface EmailPayload {
   subject?: string;
@@ -175,7 +175,7 @@ export default function Index() {
       {/* Top Bar */}
       <header className="sticky top-0 z-50 bg-card border-b border-border px-4 py-3 flex items-center justify-between shadow-sm">
         <div className="flex items-center gap-3">
-          <img src={logoImg} alt="QuoteGen" className="h-8 w-8" />
+          <img src={APP_LOGO_SRC} alt="QuoteGen logo" className="h-8 w-8 object-contain" />
           <h1 className="text-lg font-bold text-foreground">QuoteGen</h1>
           <span className="text-xs text-muted-foreground hidden sm:inline">Professional Quotation Generator</span>
         </div>
