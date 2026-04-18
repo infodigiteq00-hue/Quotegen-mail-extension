@@ -1,4 +1,18 @@
-import type { ProductItem, QuotationData } from '@/types/quotation';
+import type { CompanyBranding, LineItemColumn, ProductItem, QuotationData } from '@/types/quotation';
+
+/** Default branding fields (used for new quotations and migrating saved data). */
+export const DEFAULT_COMPANY_BRANDING: CompanyBranding = {
+  companyName: 'Your Company Name',
+  addressLine: '123 Business Avenue, Suite 100',
+  contactLine: 'info@yourcompany.com | (555) 123-4567',
+  footerText: '',
+  themeColor: '#1565c0',
+  logoDataUrl: '/quotegen-logo.svg',
+  headerImageDataUrl: '',
+  footerImageDataUrl: '',
+  letterheadDataUrl: '',
+  useLetterhead: false,
+};
 
 export function generateQuotationNumber(): string {
   const date = new Date();
@@ -12,6 +26,47 @@ export function formatDate(date: Date): string {
   return date.toISOString().split('T')[0];
 }
 
+/** Stable ids for built-in columns (labels are user-editable). */
+export const DEFAULT_LINE_ITEM_COLUMNS: LineItemColumn[] = [
+  { id: 'col-name', role: 'name', label: 'Item' },
+  { id: 'col-description', role: 'description', label: 'Description' },
+  { id: 'col-quantity', role: 'quantity', label: 'Qty' },
+  { id: 'col-unitPrice', role: 'unitPrice', label: 'Unit Price' },
+  { id: 'col-lineTotal', role: 'lineTotal', label: 'Total' },
+];
+
+function mergeLineItemColumns(saved: LineItemColumn[] | undefined): LineItemColumn[] {
+  if (!saved?.length) {
+    return DEFAULT_LINE_ITEM_COLUMNS.map(c => ({ ...c }));
+  }
+  const byRole = new Map(saved.filter(c => c.role !== 'custom').map(c => [c.role, c]));
+  const builtins = DEFAULT_LINE_ITEM_COLUMNS.map(def => {
+    const s = byRole.get(def.role);
+    return s ? { ...def, label: s.label || def.label } : { ...def };
+  });
+  const customs = saved
+    .filter(c => c.role === 'custom')
+    .map(c => ({
+      id: c.id || crypto.randomUUID(),
+      role: 'custom' as const,
+      label: c.label || 'Column',
+    }));
+  return [...builtins, ...customs];
+}
+
+/** Ensures new fields exist for data loaded from storage or older versions. */
+export function normalizeQuotationData(data: QuotationData): QuotationData {
+  return {
+    ...data,
+    lineItemColumns: mergeLineItemColumns(data.lineItemColumns),
+    products: data.products.map(p => ({
+      ...p,
+      customValues: p.customValues ?? {},
+    })),
+    branding: { ...DEFAULT_COMPANY_BRANDING, ...data.branding },
+  };
+}
+
 export function createEmptyProduct(): ProductItem {
   return {
     id: crypto.randomUUID(),
@@ -20,6 +75,7 @@ export function createEmptyProduct(): ProductItem {
     quantity: 1,
     unitPrice: 0,
     total: 0,
+    customValues: {},
   };
 }
 
@@ -49,22 +105,14 @@ export function getDefaultQuotation(): QuotationData {
     date: formatDate(now),
     validUntil: formatDate(validUntil),
     client: { name: '', company: '', address: '', email: '', phone: '' },
+    lineItemColumns: DEFAULT_LINE_ITEM_COLUMNS.map(c => ({ ...c })),
     products: [createEmptyProduct()],
     deliveryInstructions: '',
     terms: 'Payment due within 30 days of invoice date. All prices are in USD.',
     notes: '',
     discount: 0,
     taxRate: 0,
-    branding: {
-      companyName: 'Your Company Name',
-      addressLine: '123 Business Avenue, Suite 100',
-      contactLine: 'info@yourcompany.com | (555) 123-4567',
-      footerText: 'Thank you for your business • Your Company Name • www.yourcompany.com',
-      themeColor: '#1565c0',
-      logoDataUrl: '/quotegen-logo.svg',
-      letterheadDataUrl: '',
-      useLetterhead: false,
-    },
+    branding: { ...DEFAULT_COMPANY_BRANDING },
   };
 }
 
@@ -492,6 +540,7 @@ export function parsedLinesToProducts(lines: ParsedLine[]): ProductItem[] {
       quantity: q,
       unitPrice: p,
       total: q * p,
+      customValues: {},
     };
   });
 }

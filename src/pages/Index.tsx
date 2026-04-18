@@ -10,8 +10,8 @@ import ProductTable from '@/components/quotation/ProductTable';
 import EmailParser from '@/components/quotation/EmailParser';
 import QuotationPreview from '@/components/quotation/QuotationPreview';
 import BrandingSettings from '@/components/quotation/BrandingSettings';
-import { getDefaultQuotation, calculateSubtotal, calculateTax, calculateGrandTotal, formatCurrency, parseEmailContent, parsedLinesToProducts } from '@/utils/quotation';
-import { loadScopedQuotation, loadScopedTemplate, normalizeScopeId, saveScopedQuotation, saveScopedTemplate } from '@/utils/scopedStorage';
+import { getDefaultQuotation, normalizeQuotationData, calculateSubtotal, calculateTax, calculateGrandTotal, formatCurrency, parseEmailContent, parsedLinesToProducts } from '@/utils/quotation';
+import { loadScopedQuotation, loadScopedTemplate, saveScopedQuotation, saveScopedTemplate } from '@/utils/scopedStorage';
 import type { QuotationData, ProductItem } from '@/types/quotation';
 import { TEMPLATES } from '@/types/quotation';
 import { useToast } from '@/hooks/use-toast';
@@ -27,9 +27,9 @@ interface EmailPayload {
 }
 
 export default function Index() {
-  const [scopeId, setScopeId] = useState(DEFAULT_SCOPE);
-  const [scopeInput, setScopeInput] = useState(DEFAULT_SCOPE);
-  const [data, setData] = useState<QuotationData>(() => loadScopedQuotation(DEFAULT_SCOPE) ?? getDefaultQuotation());
+  const [data, setData] = useState<QuotationData>(() =>
+    normalizeQuotationData(loadScopedQuotation(DEFAULT_SCOPE) ?? getDefaultQuotation())
+  );
   const [selectedTemplate, setSelectedTemplate] = useState(() => loadScopedTemplate(DEFAULT_SCOPE) ?? 'professional');
   const previewRef = useRef<HTMLDivElement>(null);
   const handledEmailPayloadRef = useRef(false);
@@ -47,12 +47,12 @@ export default function Index() {
   };
 
   useEffect(() => {
-    saveScopedQuotation(scopeId, data);
-  }, [scopeId, data]);
+    saveScopedQuotation(DEFAULT_SCOPE, data);
+  }, [data]);
 
   useEffect(() => {
-    saveScopedTemplate(scopeId, selectedTemplate);
-  }, [scopeId, selectedTemplate]);
+    saveScopedTemplate(DEFAULT_SCOPE, selectedTemplate);
+  }, [selectedTemplate]);
 
   useEffect(() => {
     if (handledEmailPayloadRef.current) return;
@@ -125,27 +125,6 @@ export default function Index() {
     }
   }, [toast]);
 
-  const handleScopeSwitch = () => {
-    const nextScopeId = normalizeScopeId(scopeInput);
-
-    if (nextScopeId === scopeId) return;
-
-    const scopedQuotation = loadScopedQuotation(nextScopeId);
-    const scopedTemplate = loadScopedTemplate(nextScopeId);
-
-    setScopeId(nextScopeId);
-    setScopeInput(nextScopeId);
-    setData(scopedQuotation ?? getDefaultQuotation());
-    setSelectedTemplate(scopedTemplate ?? 'professional');
-
-    toast({
-      title: `Switched workspace: ${nextScopeId}`,
-      description: scopedQuotation
-        ? 'Loaded saved quotation for this workspace.'
-        : 'Started a fresh quotation for this workspace.',
-    });
-  };
-
   const handleDownloadPdf = async () => {
     if (!previewRef.current) return;
     const html2pdf = (await import('html2pdf.js')).default;
@@ -156,19 +135,21 @@ export default function Index() {
         image: { type: 'jpeg', quality: 0.98 },
         html2canvas: { scale: 2, useCORS: true },
         jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'], avoid: ['tr'] },
       })
       .from(previewRef.current)
       .save();
   };
 
   const handleReset = () => {
-    setData(getDefaultQuotation());
+    setData(normalizeQuotationData(getDefaultQuotation()));
     toast({ title: 'Quotation reset', description: 'All fields have been cleared.' });
   };
 
   const subtotal = calculateSubtotal(data.products);
   const tax = calculateTax(subtotal - data.discount, data.taxRate);
   const grandTotal = calculateGrandTotal(subtotal, data.discount, tax);
+  const selectedTemplateLabel = TEMPLATES.find(t => t.id === selectedTemplate)?.name ?? 'Template';
 
   return (
     <div className="min-h-screen bg-background">
@@ -180,28 +161,20 @@ export default function Index() {
           <span className="text-xs text-muted-foreground hidden sm:inline">Professional Quotation Generator</span>
         </div>
         <div className="flex items-center gap-2">
-          <Input
-            value={scopeInput}
-            onChange={e => setScopeInput(e.target.value)}
-            onBlur={handleScopeSwitch}
-            onKeyDown={e => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                handleScopeSwitch();
-              }
-            }}
-            placeholder="workspace-id"
-            className="w-[170px] h-8 text-xs font-mono"
-            title="Workspace ID (separate data per user/company)"
-          />
           <Select value={selectedTemplate} onValueChange={setSelectedTemplate}>
-            <SelectTrigger className="w-[160px] h-8 text-xs">
-              <SelectValue />
+            <SelectTrigger
+              className="h-9 w-[min(15rem,calc(100vw-11rem))] min-w-[11rem] shrink-0 gap-2 px-3 text-left text-xs font-medium sm:text-sm"
+              aria-label="Quotation template"
+            >
+              <SelectValue placeholder="Template">{selectedTemplateLabel}</SelectValue>
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent position="popper" sideOffset={4} className="z-[100] max-w-[min(20rem,calc(100vw-2rem))]">
               {TEMPLATES.map(t => (
-                <SelectItem key={t.id} value={t.id}>
-                  <span className="text-xs">{t.name}</span>
+                <SelectItem key={t.id} value={t.id} textValue={`${t.name} ${t.description}`} className="cursor-pointer">
+                  <div className="flex w-full min-w-0 flex-col gap-1 py-0.5 pr-1">
+                    <span className="text-sm font-medium leading-snug text-foreground">{t.name}</span>
+                    <span className="text-xs leading-normal text-muted-foreground">{t.description}</span>
+                  </div>
                 </SelectItem>
               ))}
             </SelectContent>
@@ -243,7 +216,12 @@ export default function Index() {
               <div />
               <EmailParser onProductsExtracted={handleProductsExtracted} />
             </div>
-            <ProductTable products={data.products} onChange={p => update('products', p)} />
+            <ProductTable
+              products={data.products}
+              lineItemColumns={data.lineItemColumns}
+              onProductsChange={p => update('products', p)}
+              onColumnsChange={c => update('lineItemColumns', c)}
+            />
           </div>
 
           {/* Totals */}
@@ -301,7 +279,7 @@ export default function Index() {
         <div className="lg:w-1/2 xl:w-[55%] bg-muted/50 border-l border-border lg:h-[calc(100vh-57px)] overflow-auto p-4 lg:p-6">
           <div className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Live Preview</div>
           <div className="origin-top-left" style={{ transform: 'scale(0.55)', transformOrigin: 'top left', width: '181.8%' }}>
-            <QuotationPreview ref={previewRef} data={data} />
+            <QuotationPreview ref={previewRef} data={data} templateId={selectedTemplate} />
           </div>
         </div>
       </div>

@@ -6,6 +6,15 @@ export interface ClientDetails {
   phone: string;
 }
 
+/** Built-in column roles; `custom` uses `id` as the key in `customValues`. */
+export type LineColumnRole = 'name' | 'description' | 'quantity' | 'unitPrice' | 'lineTotal' | 'custom';
+
+export interface LineItemColumn {
+  id: string;
+  role: LineColumnRole;
+  label: string;
+}
+
 export interface ProductItem {
   id: string;
   name: string;
@@ -13,6 +22,8 @@ export interface ProductItem {
   quantity: number;
   unitPrice: number;
   total: number;
+  /** Values for `role: 'custom'` columns, keyed by column `id`. */
+  customValues: Record<string, string>;
 }
 
 export interface CompanyBranding {
@@ -22,6 +33,10 @@ export interface CompanyBranding {
   footerText: string;
   themeColor: string; // hex like #1565c0
   logoDataUrl: string; // base64 PNG/JPG
+  /** Optional top banner (full width). Ignored when full-page letterhead is enabled. */
+  headerImageDataUrl: string;
+  /** Optional bottom banner (full width). Ignored when full-page letterhead is enabled. */
+  footerImageDataUrl: string;
   letterheadDataUrl: string; // optional full-page letterhead background
   useLetterhead: boolean;
 }
@@ -31,6 +46,8 @@ export interface QuotationData {
   date: string;
   validUntil: string;
   client: ClientDetails;
+  /** Column headers and order for the line items table (preview + editor). */
+  lineItemColumns: LineItemColumn[];
   products: ProductItem[];
   deliveryInstructions: string;
   terms: string;
