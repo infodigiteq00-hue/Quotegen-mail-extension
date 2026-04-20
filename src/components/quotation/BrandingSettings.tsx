@@ -24,7 +24,6 @@ type BrandingImageKey =
   | 'logoDataUrl'
   | 'headerImageDataUrl'
   | 'footerImageDataUrl'
-  | 'letterheadDataUrl'
   | 'watermarkImageDataUrl';
 
 function isAllowedPngOrJpg(file: File): boolean {
@@ -37,7 +36,6 @@ export default function BrandingSettings({ branding, onChange }: Props) {
   const logoInputRef = useRef<HTMLInputElement>(null);
   const headerImageInputRef = useRef<HTMLInputElement>(null);
   const footerImageInputRef = useRef<HTMLInputElement>(null);
-  const letterheadInputRef = useRef<HTMLInputElement>(null);
   const watermarkImageInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
@@ -105,10 +103,6 @@ export default function BrandingSettings({ branding, onChange }: Props) {
             <div className="space-y-1">
               <Label className="text-xs">Contact Line (email | phone)</Label>
               <Input value={branding.contactLine} onChange={e => update('contactLine', e.target.value)} className="text-sm" />
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs">Footer Text</Label>
-              <Textarea value={branding.footerText} onChange={e => update('footerText', e.target.value)} className="min-h-[60px] text-sm" />
             </div>
           </section>
 
@@ -243,49 +237,6 @@ export default function BrandingSettings({ branding, onChange }: Props) {
               </div>
             </div>
 
-            <div className="space-y-2 rounded-md border border-border/80 bg-muted/30 p-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <Label className="text-xs font-medium">Custom Letterhead</Label>
-                  <p className="text-xs text-muted-foreground mt-0.5">Full-page A4 background. When on, header/footer banners above are hidden in the preview.</p>
-                </div>
-                <Switch
-                  checked={branding.useLetterhead}
-                  onCheckedChange={v => update('useLetterhead', v)}
-                  disabled={!branding.letterheadDataUrl}
-                />
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  ref={letterheadInputRef}
-                  {...fileInputProps}
-                  onChange={e => {
-                    const f = e.target.files?.[0];
-                    if (f) readAsDataUrl(f, 'letterheadDataUrl');
-                    e.target.value = '';
-                  }}
-                />
-                <Button type="button" variant="outline" size="sm" onClick={() => letterheadInputRef.current?.click()}>
-                  <Upload className="h-4 w-4 mr-1" /> Upload letterhead
-                </Button>
-                {branding.letterheadDataUrl && (
-                  <>
-                    <img src={branding.letterheadDataUrl} alt="letterhead" className="h-12 w-auto rounded border bg-white" />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => {
-                        update('letterheadDataUrl', '');
-                        update('useLetterhead', false);
-                      }}
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                  </>
-                )}
-              </div>
-            </div>
           </section>
         </div>
 
