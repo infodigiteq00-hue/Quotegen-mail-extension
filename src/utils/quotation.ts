@@ -12,6 +12,9 @@ export const DEFAULT_COMPANY_BRANDING: CompanyBranding = {
   footerImageDataUrl: '',
   letterheadDataUrl: '',
   useLetterhead: false,
+  useWatermark: false,
+  watermarkText: '',
+  watermarkImageDataUrl: '',
 };
 
 export function generateQuotationNumber(): string {

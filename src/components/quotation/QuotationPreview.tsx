@@ -13,7 +13,7 @@ import {
   paginateExtrasBlocks,
   type ExtrasChunk,
 } from '@/utils/extrasPagination';
-import { getQuotationTemplateVisuals } from '@/utils/quotationTemplateStyles';
+import { getQuotationTemplateVisuals, ZEBRA_ROW_ALPHA } from '@/utils/quotationTemplateStyles';
 
 function previewCellStyle(col: LineItemColumn, cellPadding: string): React.CSSProperties {
   const base: React.CSSProperties = { padding: cellPadding };
@@ -63,6 +63,8 @@ const QuotationPreview = forwardRef<HTMLDivElement, QuotationPreviewProps>(({ da
   const theme = b.themeColor || '#1565c0';
   const tv = getQuotationTemplateVisuals(templateId, theme);
   const usingLetterhead = !!(b.useLetterhead && b.letterheadDataUrl);
+  const hasWatermarkContent = !!(b.watermarkImageDataUrl || b.watermarkText.trim());
+  const showWatermark = !!(b.useWatermark && hasWatermarkContent);
   const showHeaderBanner = !usingLetterhead && !!b.headerImageDataUrl;
   const showFooterBanner = !usingLetterhead && !!b.footerImageDataUrl;
   const showDefaultHeader = !usingLetterhead && !showHeaderBanner;
@@ -339,10 +341,13 @@ const QuotationPreview = forwardRef<HTMLDivElement, QuotationPreviewProps>(({ da
     display: 'flex',
     flexDirection: 'column',
     justifyContent: 'flex-start',
+    /* html2pdf handles legacy page-break reliably; dual break rules can create blank pages. */
     pageBreakAfter: pageIndex < pageCount - 1 ? 'always' : 'auto',
-    breakAfter: pageIndex < pageCount - 1 ? 'page' : 'auto',
-    marginBottom: pageIndex < pageCount - 1 ? '10px' : 0,
-    boxShadow: '0 1px 3px rgba(0,0,0,0.12)',
+    pageBreakInside: 'avoid',
+    breakInside: 'avoid',
+    marginBottom: 0,
+    /* Shadow can increase raster bounds in html2canvas and trigger phantom pages. */
+    boxShadow: 'none',
   });
 
   /** At least A4; height grows with content so rows are never clipped (pagination stays conservative). */
@@ -352,6 +357,89 @@ const QuotationPreview = forwardRef<HTMLDivElement, QuotationPreviewProps>(({ da
     minHeight: '297mm',
     overflow: 'visible',
   });
+
+  const pageContentWrapStyle: React.CSSProperties = {
+    position: 'relative',
+    zIndex: 1,
+    isolation: 'isolate',
+    display: 'flex',
+    flexDirection: 'column',
+    flex: '1 1 auto',
+    width: '100%',
+    minHeight: 0,
+  };
+
+  /** One A4 sheet height only — avoids centering in a tall page shell (which shifted position/size across pages). */
+  const WM_SHEET_HEIGHT_MM = 297;
+  /** Fixed upper bound for print-like layout; shrinks on narrow screens. */
+  const WM_BOX_W_MM = 56;
+  const WM_BOX_H_MM = 42;
+  /** Same apparent strength on every page; row striping still modulates slightly behind semi-transparent fills. */
+  const WM_IMAGE_OPACITY = 0.75;
+
+  const renderWatermarkLayer = () =>
+    showWatermark ? (
+      <div
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          width: '100%',
+          height: `${WM_SHEET_HEIGHT_MM}mm`,
+          overflow: 'hidden',
+          pointerEvents: 'none',
+          zIndex: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+        aria-hidden
+      >
+        {b.watermarkImageDataUrl ? (
+          <div
+            style={{
+              width: `${WM_BOX_W_MM}mm`,
+              height: `${WM_BOX_H_MM}mm`,
+              maxWidth: '42%',
+              boxSizing: 'border-box',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <img
+              src={b.watermarkImageDataUrl}
+              alt=""
+              style={{
+                display: 'block',
+                /* Fill watermark frame width while keeping original ratio (no stretch). */
+                width: '100%',
+                height: 'auto',
+                maxHeight: '100%',
+                opacity: WM_IMAGE_OPACITY,
+              }}
+            />
+          </div>
+        ) : (
+          <div
+            style={{
+              maxWidth: '78%',
+              fontSize: 'clamp(16pt, 4vw, 32pt)',
+              fontWeight: 700,
+              color: theme,
+              opacity: 0.26,
+              whiteSpace: 'nowrap',
+              userSelect: 'none',
+              letterSpacing: '0.06em',
+              textAlign: 'center',
+            }}
+          >
+            {b.watermarkText.trim()}
+          </div>
+        )}
+      </div>
+    ) : null;
 
   const tablePageMiddle = (slice: ProductItem[], pageIndex: number, includeTotals: boolean) => {
     const startIdx = rowStarts[pageIndex] ?? 0;
@@ -370,9 +458,12 @@ const QuotationPreview = forwardRef<HTMLDivElement, QuotationPreviewProps>(({ da
     <div ref={ref} style={{ background: 'transparent' }}>
       {singlePageDoc && !hasExtras ? (
         <div key={0} className="quotation-a4-page" style={previewPageShellStyle(0, 1)}>
-          <div style={{ flexShrink: 0 }}>{topChrome}</div>
-          {tablePageMiddle(tablePages[0] ?? [], 0, true)}
-          <div style={{ flexShrink: 0, flexGrow: 0, marginTop: 'auto', alignSelf: 'stretch' }}>{footerChrome}</div>
+          {renderWatermarkLayer()}
+          <div style={pageContentWrapStyle}>
+            <div style={{ flexShrink: 0 }}>{topChrome}</div>
+            {tablePageMiddle(tablePages[0] ?? [], 0, true)}
+            <div style={{ flexShrink: 0, flexGrow: 0, marginTop: 'auto', alignSelf: 'stretch' }}>{footerChrome}</div>
+          </div>
         </div>
       ) : (
         <>
@@ -380,22 +471,38 @@ const QuotationPreview = forwardRef<HTMLDivElement, QuotationPreviewProps>(({ da
             const isLastTablePage = pageIndex === (singlePageDoc ? 0 : tablePages.length - 1);
             return (
               <div key={`t-${pageIndex}`} className="quotation-a4-page" style={previewPageShellStyle(pageIndex, totalPages)}>
-                <div style={{ flexShrink: 0 }}>{topChrome}</div>
-                {tablePageMiddle(slice, pageIndex, isLastTablePage)}
-                <div style={{ flexShrink: 0, flexGrow: 0, marginTop: 'auto', alignSelf: 'stretch' }}>{footerChrome}</div>
+                {renderWatermarkLayer()}
+                <div style={pageContentWrapStyle}>
+                  <div style={{ flexShrink: 0 }}>{topChrome}</div>
+                  {tablePageMiddle(slice, pageIndex, isLastTablePage)}
+                  <div style={{ flexShrink: 0, flexGrow: 0, marginTop: 'auto', alignSelf: 'stretch' }}>{footerChrome}</div>
+                </div>
               </div>
             );
           })}
           {hasExtras &&
             extrasPages.map((chunks, ei) => (
               <div key={`x-${ei}`} className="quotation-a4-page" style={previewPageShellStyle(tablePageCount + ei, totalPages)}>
-                <div style={{ flexShrink: 0 }}>{topChrome}</div>
-                <div style={{ flex: '1 1 auto', display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'visible' }}>
-                  {letterheadBodySpacer}
-                  {renderExtrasChunks(chunks)}
-                  <div style={{ flex: '1 1 auto', minHeight: '1mm' }} aria-hidden />
+                {renderWatermarkLayer()}
+                <div style={pageContentWrapStyle}>
+                  <div style={{ flexShrink: 0 }}>{topChrome}</div>
+                  <div
+                    style={{
+                      flex: '1 1 auto',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      minWidth: 0,
+                      overflow: 'visible',
+                      /* Same veil as table rows so watermark strength matches Terms/Notes vs line items. */
+                      backgroundColor: `rgba(255,255,255,${ZEBRA_ROW_ALPHA})`,
+                    }}
+                  >
+                    {letterheadBodySpacer}
+                    {renderExtrasChunks(chunks)}
+                    <div style={{ flex: '1 1 auto', minHeight: '1mm' }} aria-hidden />
+                  </div>
+                  <div style={{ flexShrink: 0, flexGrow: 0, marginTop: 'auto', alignSelf: 'stretch' }}>{footerChrome}</div>
                 </div>
-                <div style={{ flexShrink: 0, flexGrow: 0, marginTop: 'auto', alignSelf: 'stretch' }}>{footerChrome}</div>
               </div>
             ))}
         </>

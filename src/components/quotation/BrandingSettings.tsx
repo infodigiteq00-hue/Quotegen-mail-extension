@@ -20,7 +20,12 @@ const MAX_BYTES = 2 * 1024 * 1024; // 2MB
 const IMAGE_ACCEPT = 'image/png,image/jpeg,.png,.jpg,.jpeg';
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg']);
 
-type BrandingImageKey = 'logoDataUrl' | 'headerImageDataUrl' | 'footerImageDataUrl' | 'letterheadDataUrl';
+type BrandingImageKey =
+  | 'logoDataUrl'
+  | 'headerImageDataUrl'
+  | 'footerImageDataUrl'
+  | 'letterheadDataUrl'
+  | 'watermarkImageDataUrl';
 
 function isAllowedPngOrJpg(file: File): boolean {
   if (ALLOWED_MIME.has(file.type)) return true;
@@ -33,6 +38,7 @@ export default function BrandingSettings({ branding, onChange }: Props) {
   const headerImageInputRef = useRef<HTMLInputElement>(null);
   const footerImageInputRef = useRef<HTMLInputElement>(null);
   const letterheadInputRef = useRef<HTMLInputElement>(null);
+  const watermarkImageInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
   const update = <K extends keyof CompanyBranding>(key: K, value: CompanyBranding[K]) =>
@@ -190,6 +196,45 @@ export default function BrandingSettings({ branding, onChange }: Props) {
                     <>
                       <img src={branding.footerImageDataUrl} alt="Footer preview" className="h-12 max-w-[200px] object-contain rounded border bg-white" />
                       <Button type="button" variant="ghost" size="icon" onClick={() => update('footerImageDataUrl', '')} title="Remove footer image">
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2 rounded-md border border-border/80 bg-muted/30 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <Label className="text-xs font-medium">Watermark</Label>
+                  <p className="text-xs text-muted-foreground mt-0.5">Optional image behind the content on every page.</p>
+                </div>
+                <Switch checked={branding.useWatermark} onCheckedChange={v => update('useWatermark', v)} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Watermark image</Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    ref={watermarkImageInputRef}
+                    {...fileInputProps}
+                    onChange={e => {
+                      const f = e.target.files?.[0];
+                      if (f) readAsDataUrl(f, 'watermarkImageDataUrl');
+                      e.target.value = '';
+                    }}
+                  />
+                  <Button type="button" variant="outline" size="sm" onClick={() => watermarkImageInputRef.current?.click()}>
+                    <Upload className="h-4 w-4 mr-1" /> Upload image
+                  </Button>
+                  {branding.watermarkImageDataUrl && (
+                    <>
+                      <img
+                        src={branding.watermarkImageDataUrl}
+                        alt="Watermark preview"
+                        className="h-12 max-w-[200px] object-contain rounded border bg-white opacity-70"
+                      />
+                      <Button type="button" variant="ghost" size="icon" onClick={() => update('watermarkImageDataUrl', '')} title="Remove watermark image">
                         <X className="h-4 w-4" />
                       </Button>
                     </>

@@ -2,6 +2,12 @@ import type { CSSProperties } from 'react';
 
 export type QuotationTemplateId = 'professional' | 'modern' | 'classic';
 
+/**
+ * One alpha for all zebra rows so a background watermark composites the same on every stripe
+ * (mixed 0.85 vs 0.95 made it look “stronger/weaker” on alternate lines and vs Terms/Notes pages).
+ */
+export const ZEBRA_ROW_ALPHA = 0.92;
+
 export interface QuotationTemplateVisuals {
   fontFamily: string;
   bodyColor: string;
@@ -69,7 +75,8 @@ export function getQuotationTemplateVisuals(templateId: string | undefined, them
       tableHeadCellColor: '#18181b',
       tableBodyRow: i => ({
         borderBottom: '1px solid #e4e4e7',
-        background: i % 2 === 0 ? 'rgba(255,255,255,0.95)' : 'rgba(250,250,250,0.95)',
+        background:
+          i % 2 === 0 ? `rgba(255,255,255,${ZEBRA_ROW_ALPHA})` : `rgba(250,250,250,${ZEBRA_ROW_ALPHA})`,
       }),
       totalsTopBorder: { borderTop: `2px solid ${themeColor}` },
     };
@@ -118,7 +125,8 @@ export function getQuotationTemplateVisuals(templateId: string | undefined, them
       tableHeadCellColor: '#1a1a1a',
       tableBodyRow: i => ({
         borderBottom: '1px solid #e0ddd6',
-        background: i % 2 === 0 ? '#fff' : '#faf8f5',
+        background:
+          i % 2 === 0 ? `rgba(255,255,255,${ZEBRA_ROW_ALPHA})` : `rgba(250,248,245,${ZEBRA_ROW_ALPHA})`,
       }),
       totalsTopBorder: { borderTop: `2px solid ${themeColor}` },
     };
@@ -160,7 +168,8 @@ export function getQuotationTemplateVisuals(templateId: string | undefined, them
     tableHeadCellColor: '#ffffff',
     tableBodyRow: i => ({
       borderBottom: '1px solid #e8eaed',
-      background: i % 2 === 0 ? 'rgba(255,255,255,0.85)' : 'rgba(250,251,252,0.85)',
+      background:
+        i % 2 === 0 ? `rgba(255,255,255,${ZEBRA_ROW_ALPHA})` : `rgba(250,251,252,${ZEBRA_ROW_ALPHA})`,
     }),
     totalsTopBorder: { borderTop: `2px solid ${themeColor}` },
   };

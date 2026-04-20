@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Download, FileText, RotateCcw } from 'lucide-react';
+import { ChevronDown, Download, FileText, RotateCcw } from 'lucide-react';
 import ClientForm from '@/components/quotation/ClientForm';
 import ProductTable from '@/components/quotation/ProductTable';
 import EmailParser from '@/components/quotation/EmailParser';
@@ -31,6 +31,7 @@ export default function Index() {
     normalizeQuotationData(loadScopedQuotation(DEFAULT_SCOPE) ?? getDefaultQuotation())
   );
   const [selectedTemplate, setSelectedTemplate] = useState(() => loadScopedTemplate(DEFAULT_SCOPE) ?? 'professional');
+  const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
   const handledEmailPayloadRef = useRef(false);
   const { toast } = useToast();
@@ -127,18 +128,59 @@ export default function Index() {
 
   const handleDownloadPdf = async () => {
     if (!previewRef.current) return;
-    const html2pdf = (await import('html2pdf.js')).default;
-    html2pdf()
-      .set({
-        margin: 0,
-        filename: `${data.quotationNumber}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-        pagebreak: { mode: ['css', 'legacy'], avoid: ['tr'] },
-      })
-      .from(previewRef.current)
-      .save();
+    const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import('html2canvas'), import('jspdf')]);
+    const exportRoot = previewRef.current.cloneNode(true) as HTMLDivElement;
+    exportRoot.style.position = 'fixed';
+    exportRoot.style.left = '0';
+    exportRoot.style.top = '0';
+    exportRoot.style.width = '210mm';
+    exportRoot.style.maxWidth = '210mm';
+    exportRoot.style.background = 'white';
+    exportRoot.style.padding = '0';
+    exportRoot.style.margin = '0';
+    exportRoot.style.opacity = '0';
+    exportRoot.style.pointerEvents = 'none';
+    exportRoot.style.zIndex = '2147483647';
+
+    const exportPages = Array.from(exportRoot.querySelectorAll<HTMLElement>('.quotation-a4-page'));
+    exportPages.forEach(page => {
+      page.style.width = '210mm';
+      page.style.minHeight = '297mm';
+      page.style.height = '297mm';
+      page.style.maxHeight = '297mm';
+      page.style.overflow = 'hidden';
+      page.style.marginBottom = '0';
+      page.style.boxShadow = 'none';
+      page.style.pageBreakInside = 'avoid';
+      page.style.breakInside = 'avoid';
+    });
+
+    document.body.appendChild(exportRoot);
+    try {
+      if (!exportPages.length) {
+        toast({ title: 'PDF export failed', description: 'No preview pages were found.', variant: 'destructive' });
+        return;
+      }
+
+      const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
+      for (let i = 0; i < exportPages.length; i++) {
+        const page = exportPages[i];
+        const canvas = await html2canvas(page, {
+          scale: 2,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          logging: false,
+          windowWidth: page.scrollWidth,
+          windowHeight: page.scrollHeight,
+        });
+        const imgData = canvas.toDataURL('image/jpeg', 0.98);
+        if (i > 0) pdf.addPage('a4', 'portrait');
+        pdf.addImage(imgData, 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
+      }
+      pdf.save(`${data.quotationNumber}.pdf`);
+    } finally {
+      exportRoot.remove();
+    }
   };
 
   const handleReset = () => {
@@ -152,41 +194,86 @@ export default function Index() {
   const selectedTemplateLabel = TEMPLATES.find(t => t.id === selectedTemplate)?.name ?? 'Template';
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen overflow-x-hidden bg-background">
       {/* Top Bar */}
-      <header className="sticky top-0 z-50 bg-card border-b border-border px-4 py-3 flex items-center justify-between shadow-sm">
-        <div className="flex items-center gap-3">
-          <img src={APP_LOGO_SRC} alt="QuoteGen logo" className="h-8 w-8 object-contain" />
-          <h1 className="text-lg font-bold text-foreground">QuoteGen</h1>
-          <span className="text-xs text-muted-foreground hidden sm:inline">Professional Quotation Generator</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Select value={selectedTemplate} onValueChange={setSelectedTemplate}>
-            <SelectTrigger
-              className="h-9 w-[min(15rem,calc(100vw-11rem))] min-w-[11rem] shrink-0 gap-2 px-3 text-left text-xs font-medium sm:text-sm"
-              aria-label="Quotation template"
+      <header className="sticky top-0 z-50 border-b border-border bg-card px-4 py-3 shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <img src={APP_LOGO_SRC} alt="QuoteGen logo" className="h-8 w-8 object-contain" />
+            <h1 className="truncate text-lg font-bold text-foreground">QuoteGen</h1>
+            <span className="text-xs text-muted-foreground hidden sm:inline">Professional Quotation Generator</span>
+          </div>
+
+          <div className="hidden items-center gap-2 md:flex">
+            <Select value={selectedTemplate} onValueChange={setSelectedTemplate}>
+              <SelectTrigger
+                className="h-9 w-[min(15rem,calc(100vw-22rem))] min-w-[11rem] shrink-0 gap-2 px-3 text-left text-xs font-medium sm:text-sm"
+                aria-label="Quotation template"
+              >
+                <SelectValue placeholder="Template">{selectedTemplateLabel}</SelectValue>
+              </SelectTrigger>
+              <SelectContent position="popper" sideOffset={4} className="z-[100] max-w-[min(20rem,calc(100vw-2rem))]">
+                {TEMPLATES.map(t => (
+                  <SelectItem key={t.id} value={t.id} textValue={`${t.name} ${t.description}`} className="cursor-pointer">
+                    <div className="flex w-full min-w-0 flex-col gap-1 py-0.5 pr-1">
+                      <span className="text-sm font-medium leading-snug text-foreground">{t.name}</span>
+                      <span className="text-xs leading-normal text-muted-foreground">{t.description}</span>
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <BrandingSettings branding={data.branding} onChange={b => update('branding', b)} />
+            <Button variant="outline" size="sm" onClick={handleReset}>
+              <RotateCcw className="h-4 w-4 mr-1" /> Reset
+            </Button>
+            <Button size="sm" onClick={handleDownloadPdf}>
+              <Download className="h-4 w-4 mr-1" /> Download PDF
+            </Button>
+          </div>
+
+          <div className="md:hidden">
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-foreground"
+              aria-label={mobileActionsOpen ? 'Collapse actions' : 'Expand actions'}
+              onClick={() => setMobileActionsOpen(prev => !prev)}
             >
-              <SelectValue placeholder="Template">{selectedTemplateLabel}</SelectValue>
-            </SelectTrigger>
-            <SelectContent position="popper" sideOffset={4} className="z-[100] max-w-[min(20rem,calc(100vw-2rem))]">
-              {TEMPLATES.map(t => (
-                <SelectItem key={t.id} value={t.id} textValue={`${t.name} ${t.description}`} className="cursor-pointer">
-                  <div className="flex w-full min-w-0 flex-col gap-1 py-0.5 pr-1">
-                    <span className="text-sm font-medium leading-snug text-foreground">{t.name}</span>
-                    <span className="text-xs leading-normal text-muted-foreground">{t.description}</span>
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <BrandingSettings branding={data.branding} onChange={b => update('branding', b)} />
-          <Button variant="outline" size="sm" onClick={handleReset}>
-            <RotateCcw className="h-4 w-4 mr-1" /> Reset
-          </Button>
-          <Button size="sm" onClick={handleDownloadPdf}>
-            <Download className="h-4 w-4 mr-1" /> Download PDF
-          </Button>
+              <ChevronDown className={`h-5 w-5 transition-transform ${mobileActionsOpen ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
         </div>
+
+        {mobileActionsOpen && (
+          <div className="mt-3 border-t border-border pt-3 md:hidden">
+            <div className="grid grid-cols-1 gap-2">
+              <Select value={selectedTemplate} onValueChange={setSelectedTemplate}>
+                <SelectTrigger className="h-10 w-full">
+                  <SelectValue placeholder="Template">{selectedTemplateLabel}</SelectValue>
+                </SelectTrigger>
+                <SelectContent position="popper" sideOffset={4} className="z-[100] max-w-[min(20rem,calc(100vw-2rem))]">
+                  {TEMPLATES.map(t => (
+                    <SelectItem key={t.id} value={t.id} textValue={`${t.name} ${t.description}`} className="cursor-pointer">
+                      <div className="flex w-full min-w-0 flex-col gap-1 py-0.5 pr-1">
+                        <span className="text-sm font-medium leading-snug text-foreground">{t.name}</span>
+                        <span className="text-xs leading-normal text-muted-foreground">{t.description}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <div className="flex flex-wrap items-center gap-2">
+                <BrandingSettings branding={data.branding} onChange={b => update('branding', b)} />
+                <Button variant="outline" onClick={handleReset} className="justify-start">
+                  <RotateCcw className="mr-2 h-4 w-4" /> Reset
+                </Button>
+                <Button onClick={handleDownloadPdf} className="w-fit justify-start">
+                  <Download className="mr-2 h-4 w-4" /> Download PDF
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </header>
 
       <div className="flex flex-col lg:flex-row">
@@ -278,8 +365,17 @@ export default function Index() {
         {/* Right: Preview */}
         <div className="lg:w-1/2 xl:w-[55%] bg-muted/50 border-l border-border lg:h-[calc(100vh-57px)] overflow-auto p-4 lg:p-6">
           <div className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Live Preview</div>
-          <div className="origin-top-left" style={{ transform: 'scale(0.55)', transformOrigin: 'top left', width: '181.8%' }}>
-            <QuotationPreview ref={previewRef} data={data} templateId={selectedTemplate} />
+          <div className="flex justify-center overflow-x-auto">
+            <div
+              className="origin-top"
+              style={{
+                transform: 'scale(0.55)',
+                transformOrigin: 'top center',
+                width: '181.8%',
+              }}
+            >
+              <QuotationPreview ref={previewRef} data={data} templateId={selectedTemplate} />
+            </div>
           </div>
         </div>
       </div>

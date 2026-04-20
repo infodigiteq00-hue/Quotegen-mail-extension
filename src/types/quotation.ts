@@ -39,6 +39,12 @@ export interface CompanyBranding {
   footerImageDataUrl: string;
   letterheadDataUrl: string; // optional full-page letterhead background
   useLetterhead: boolean;
+  /** Optional diagonal overlay on every page (PDF + preview). */
+  useWatermark: boolean;
+  /** Shown when no watermark image; e.g. DRAFT, CONFIDENTIAL. */
+  watermarkText: string;
+  /** Optional semi-transparent graphic; takes precedence over text when set. */
+  watermarkImageDataUrl: string;
 }
 
 export interface QuotationData {
