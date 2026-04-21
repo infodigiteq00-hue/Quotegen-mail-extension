@@ -1,17 +1,44 @@
+import { useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Plus, Trash2, X } from 'lucide-react';
 import type { LineItemColumn, ProductItem } from '@/types/quotation';
 import { createEmptyProduct, formatCurrency } from '@/utils/quotation';
 
+export interface ProductSuggestion {
+  productName: string;
+  productId: string;
+  productDescription: string;
+  productMaterial: string;
+  unitPrice: number;
+}
+
 interface ProductTableProps {
   products: ProductItem[];
   lineItemColumns: LineItemColumn[];
+  productSuggestions?: ProductSuggestion[];
   onProductsChange: (products: ProductItem[]) => void;
   onColumnsChange: (columns: LineItemColumn[]) => void;
 }
 
-export default function ProductTable({ products, lineItemColumns, onProductsChange, onColumnsChange }: ProductTableProps) {
+export default function ProductTable({
+  products,
+  lineItemColumns,
+  productSuggestions = [],
+  onProductsChange,
+  onColumnsChange,
+}: ProductTableProps) {
+  const [activeSuggestionRowId, setActiveSuggestionRowId] = useState<string | null>(null);
+  const normalizedSuggestions = useMemo(
+    () =>
+      productSuggestions.map(suggestion => ({
+        ...suggestion,
+        searchText: `${suggestion.productName} ${suggestion.productId}`.toLowerCase(),
+      })),
+    [productSuggestions]
+  );
+
   const updateProduct = (id: string, field: keyof ProductItem, value: string | number) => {
     onProductsChange(
       products.map(p => {
@@ -23,6 +50,54 @@ export default function ProductTable({ products, lineItemColumns, onProductsChan
         return updated;
       })
     );
+  };
+
+  const applySuggestionToProduct = (productId: string, typedName: string) => {
+    const normalizedName = typedName.trim().toLowerCase();
+    const matched = normalizedSuggestions.find(
+      suggestion => suggestion.productName.trim().toLowerCase() === normalizedName
+    );
+
+    if (!matched) {
+      updateProduct(productId, 'name', typedName);
+      return;
+    }
+
+    onProductsChange(
+      products.map(p => {
+        if (p.id !== productId) return p;
+
+        const customValues = { ...p.customValues };
+        lineItemColumns
+          .filter(col => col.role === 'custom')
+          .forEach(col => {
+            const label = col.label.trim().toLowerCase();
+            if (label.includes('material')) {
+              customValues[col.id] = matched.productMaterial;
+            } else if (label.includes('id') || label.includes('code') || label.includes('sku')) {
+              customValues[col.id] = matched.productId;
+            }
+          });
+
+        const nextUnitPrice = Number.isFinite(matched.unitPrice) ? matched.unitPrice : p.unitPrice;
+        return {
+          ...p,
+          name: matched.productName,
+          description: matched.productDescription,
+          unitPrice: nextUnitPrice,
+          total: Number(p.quantity) * Number(nextUnitPrice),
+          customValues,
+        };
+      })
+    );
+  };
+
+  const getFilteredSuggestions = (typedName: string) => {
+    const normalized = typedName.trim().toLowerCase();
+    if (!normalized) return normalizedSuggestions.slice(0, 8);
+    return normalizedSuggestions
+      .filter(suggestion => suggestion.searchText.includes(normalized))
+      .slice(0, 8);
   };
 
   const updateCustomValue = (productId: string, columnId: string, value: string) => {
@@ -69,12 +144,59 @@ export default function ProductTable({ products, lineItemColumns, onProductsChan
   const renderCell = (item: ProductItem, col: LineItemColumn) => {
     switch (col.role) {
       case 'name':
+        const rowSuggestions = getFilteredSuggestions(item.name);
+        const showSuggestions =
+          activeSuggestionRowId === item.id && rowSuggestions.length > 0;
         return (
-          <Input className="h-8 text-sm" placeholder="Product name" value={item.name} onChange={e => updateProduct(item.id, 'name', e.target.value)} />
+          <Popover
+            open={showSuggestions}
+            onOpenChange={open => setActiveSuggestionRowId(open ? item.id : null)}
+          >
+            <PopoverTrigger asChild>
+              <Input
+                className="h-8 text-sm"
+                placeholder="Product name"
+                value={item.name}
+                onFocus={() => setActiveSuggestionRowId(item.id)}
+                onChange={e => {
+                  applySuggestionToProduct(item.id, e.target.value);
+                  setActiveSuggestionRowId(item.id);
+                }}
+              />
+            </PopoverTrigger>
+            <PopoverContent
+              align="start"
+              sideOffset={4}
+              className="z-[100] w-[var(--radix-popover-trigger-width)] p-1"
+            >
+              <ul className="max-h-56 overflow-y-auto">
+                {rowSuggestions.map(suggestion => (
+                  <li key={`${item.id}-${suggestion.productId}-${suggestion.productName}`}>
+                    <button
+                      type="button"
+                      className="flex w-full flex-col items-start rounded-sm px-3 py-2 text-left hover:bg-accent hover:text-accent-foreground"
+                      onClick={() => {
+                        applySuggestionToProduct(item.id, suggestion.productName);
+                        setActiveSuggestionRowId(null);
+                      }}
+                    >
+                      <span className="text-sm font-medium">{suggestion.productName}</span>
+                      <span className="text-xs text-muted-foreground">{suggestion.productId}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </PopoverContent>
+          </Popover>
         );
       case 'description':
         return (
-          <Input className="h-8 text-sm" placeholder="Description" value={item.description} onChange={e => updateProduct(item.id, 'description', e.target.value)} />
+          <Input
+            className="h-8 text-sm"
+            placeholder="Description"
+            value={item.description}
+            onChange={e => updateProduct(item.id, 'description', e.target.value)}
+          />
         );
       case 'quantity':
         return (
@@ -98,7 +220,11 @@ export default function ProductTable({ products, lineItemColumns, onProductsChan
           />
         );
       case 'lineTotal':
-        return <div className="h-8 flex items-center justify-end font-medium text-foreground px-2">{formatCurrency(item.total)}</div>;
+        return (
+          <div className="h-8 flex items-center justify-end font-medium text-foreground px-2">
+            {formatCurrency(item.total)}
+          </div>
+        );
       case 'custom':
         return (
           <Input

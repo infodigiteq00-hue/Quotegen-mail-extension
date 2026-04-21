@@ -3,6 +3,10 @@ export interface AuthUser {
   name: string;
   email: string;
   createdAt: string;
+  role: "user" | "admin";
+  subscriptionPlan: "free" | "pro" | "enterprise";
+  quoteGenerationLimit: number;
+  lastLoginAt: string | null;
 }
 
 export interface StoredAuthUser extends AuthUser {

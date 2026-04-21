@@ -17,12 +17,122 @@ export const DEFAULT_COMPANY_BRANDING: CompanyBranding = {
   watermarkImageDataUrl: '',
 };
 
-export function generateQuotationNumber(): string {
-  const date = new Date();
-  const y = date.getFullYear().toString().slice(-2);
-  const m = (date.getMonth() + 1).toString().padStart(2, '0');
-  const seq = Math.floor(1000 + Math.random() * 9000);
-  return `QT-${y}${m}-${seq}`;
+/** Persisted sequence + prefix for auto-incrementing quotation numbers (localStorage). */
+const QUOTATION_SEQ_STORAGE_KEY = 'quotegen:v1:quotation-seq-state';
+
+export const DEFAULT_QUOTATION_PREFIX = 'QT-';
+
+export interface QuotationSeqState {
+  lastSeq: number;
+  prefix: string;
+}
+
+const DEFAULT_SEQ_STATE: QuotationSeqState = { lastSeq: 0, prefix: DEFAULT_QUOTATION_PREFIX };
+
+function getSeqStorage(): Storage | null {
+  if (typeof window === 'undefined') return null;
+  return window.localStorage;
+}
+
+function loadSeqState(): QuotationSeqState {
+  const storage = getSeqStorage();
+  if (!storage) return { ...DEFAULT_SEQ_STATE };
+  try {
+    const raw = storage.getItem(QUOTATION_SEQ_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_SEQ_STATE };
+    const parsed = JSON.parse(raw) as Partial<QuotationSeqState>;
+    const lastSeq =
+      typeof parsed.lastSeq === 'number' && Number.isFinite(parsed.lastSeq)
+        ? Math.max(0, Math.floor(parsed.lastSeq))
+        : 0;
+    const prefix =
+      typeof parsed.prefix === 'string' && parsed.prefix.length > 0 ? parsed.prefix : DEFAULT_QUOTATION_PREFIX;
+    return { lastSeq, prefix };
+  } catch {
+    return { ...DEFAULT_SEQ_STATE };
+  }
+}
+
+function saveSeqState(state: QuotationSeqState): void {
+  const storage = getSeqStorage();
+  if (!storage) return;
+  storage.setItem(QUOTATION_SEQ_STORAGE_KEY, JSON.stringify(state));
+}
+
+/** Trailing digit run is the sequence; everything before is the prefix. */
+export function parseQuotationNumberParts(value: string): { prefix: string; sequence: number } | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const m = trimmed.match(/^(.*?)(\d+)$/);
+  if (!m) return null;
+  const rawPrefix = m[1];
+  const sequence = parseInt(m[2], 10);
+  if (!Number.isFinite(sequence) || sequence < 0) return null;
+  const prefix = rawPrefix.length > 0 ? rawPrefix : DEFAULT_QUOTATION_PREFIX;
+  return { prefix, sequence };
+}
+
+function formatQuotationSequence(prefix: string, sequence: number): string {
+  const digits = String(sequence);
+  const padded = digits.length < 4 ? digits.padStart(4, '0') : digits;
+  return `${prefix}${padded}`;
+}
+
+/** Increments stored sequence and returns the next quotation number. */
+export function allocateNextQuotationNumber(): string {
+  const state = loadSeqState();
+  const nextSeq = state.lastSeq + 1;
+  const formatted = formatQuotationSequence(state.prefix, nextSeq);
+  saveSeqState({ ...state, lastSeq: nextSeq });
+  return formatted;
+}
+
+/**
+ * Updates stored last sequence and prefix from a manual (or loaded) value so the next
+ * allocate continues from max(stored, parsed) + 1 with the same prefix style.
+ */
+export function syncSeqFromQuotationNumber(value: string): void {
+  const parsed = parseQuotationNumberParts(value);
+  if (!parsed) return;
+  const state = loadSeqState();
+  const newLast = Math.max(state.lastSeq, parsed.sequence);
+  saveSeqState({ lastSeq: newLast, prefix: parsed.prefix });
+}
+
+/** For tests / inspection only */
+export function getQuotationSeqState(): QuotationSeqState {
+  return loadSeqState();
+}
+
+let defaultQuotationMountCache: QuotationData | null = null;
+
+/** Same as getDefaultQuotation but safe under React Strict Mode double mount (single allocate). */
+export function getDefaultQuotationForInitialMount(): QuotationData {
+  if (!defaultQuotationMountCache) {
+    defaultQuotationMountCache = buildNewQuotationData();
+  }
+  return normalizeQuotationData(JSON.parse(JSON.stringify(defaultQuotationMountCache)) as QuotationData);
+}
+
+function buildNewQuotationData(): QuotationData {
+  const now = new Date();
+  const validUntil = new Date(now);
+  validUntil.setDate(validUntil.getDate() + 30);
+
+  return {
+    quotationNumber: allocateNextQuotationNumber(),
+    date: formatDate(now),
+    validUntil: formatDate(validUntil),
+    client: { name: '', company: '', address: '', email: '', phone: '' },
+    lineItemColumns: DEFAULT_LINE_ITEM_COLUMNS.map(c => ({ ...c })),
+    products: [createEmptyProduct()],
+    deliveryInstructions: '',
+    terms: 'Payment due within 30 days of invoice date. All prices are in USD.',
+    notes: '',
+    discount: 0,
+    taxRate: 0,
+    branding: { ...DEFAULT_COMPANY_BRANDING },
+  };
 }
 
 export function formatDate(date: Date): string {
@@ -99,24 +209,7 @@ export function calculateGrandTotal(subtotal: number, discount: number, tax: num
 }
 
 export function getDefaultQuotation(): QuotationData {
-  const now = new Date();
-  const validUntil = new Date(now);
-  validUntil.setDate(validUntil.getDate() + 30);
-
-  return {
-    quotationNumber: generateQuotationNumber(),
-    date: formatDate(now),
-    validUntil: formatDate(validUntil),
-    client: { name: '', company: '', address: '', email: '', phone: '' },
-    lineItemColumns: DEFAULT_LINE_ITEM_COLUMNS.map(c => ({ ...c })),
-    products: [createEmptyProduct()],
-    deliveryInstructions: '',
-    terms: 'Payment due within 30 days of invoice date. All prices are in USD.',
-    notes: '',
-    discount: 0,
-    taxRate: 0,
-    branding: { ...DEFAULT_COMPANY_BRANDING },
-  };
+  return buildNewQuotationData();
 }
 
 export interface ParsedLine {

@@ -34,23 +34,41 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarTrigger,
 } from '@/components/ui/sidebar';
 import ClientForm from '@/components/quotation/ClientForm';
 import ProductTable from '@/components/quotation/ProductTable';
 import EmailParser from '@/components/quotation/EmailParser';
 import QuotationPreview from '@/components/quotation/QuotationPreview';
 import BrandingSettings from '@/components/quotation/BrandingSettings';
-import { getDefaultQuotation, normalizeQuotationData, calculateSubtotal, calculateTax, calculateGrandTotal, formatCurrency, parseEmailContent, parsedLinesToProducts } from '@/utils/quotation';
+import {
+  getDefaultQuotation,
+  getDefaultQuotationForInitialMount,
+  normalizeQuotationData,
+  calculateSubtotal,
+  calculateTax,
+  calculateGrandTotal,
+  formatCurrency,
+  parseEmailContent,
+  parsedLinesToProducts,
+  syncSeqFromQuotationNumber,
+} from '@/utils/quotation';
 import { loadScopedQuotation, loadScopedTemplate, saveScopedQuotation, saveScopedTemplate } from '@/utils/scopedStorage';
 import type { QuotationData, ProductItem } from '@/types/quotation';
 import { TEMPLATES } from '@/types/quotation';
 import { useToast } from '@/hooks/use-toast';
-import { getCurrentUser, logout } from '@/utils/authStorage';
+import {
+  getCurrentUser,
+  getCurrentUserQuoteQuota,
+  incrementQuoteGenerationForCurrentUser,
+  logout,
+} from '@/utils/authStorage';
 
 const DEFAULT_SCOPE = 'default';
 const EMAIL_PAYLOAD_QUERY_KEY = 'email_payload';
 const APP_LOGO_SRC = '/quotegen-logo.svg';
 const QUOTATION_HISTORY_KEY = 'quotegen:v1:quotation-history';
+const PRODUCT_CATALOG_KEY = 'quotegen:v1:product-catalog';
 
 type SidebarSection = 'generate-quote' | 'quotation-history' | 'product-tab';
 
@@ -113,24 +131,69 @@ function saveHistory(entries: HistoryEntry[]): void {
   window.localStorage.setItem(QUOTATION_HISTORY_KEY, JSON.stringify(entries));
 }
 
+function loadProductCatalogItems(): ProductCatalogItem[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(PRODUCT_CATALOG_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Partial<ProductCatalogItem>[];
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.map(item => ({
+      id: item.id || crypto.randomUUID(),
+      productName: item.productName ?? '',
+      productId: item.productId ?? '',
+      productDescription: item.productDescription ?? '',
+      productMaterial: item.productMaterial ?? '',
+      productImageDataUrl: item.productImageDataUrl ?? '',
+      quantity: typeof item.quantity === 'number' ? item.quantity : 1,
+      unitPrice: typeof item.unitPrice === 'number' ? item.unitPrice : 0,
+      discount: typeof item.discount === 'number' ? item.discount : 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function saveProductCatalogItems(items: ProductCatalogItem[]): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(PRODUCT_CATALOG_KEY, JSON.stringify(items));
+}
+
 interface EmailPayload {
   subject?: string;
   to?: string;
   body?: string;
 }
 
+function getPreviewScale(width: number): number {
+  if (width < 480) return 0.36;
+  if (width < 640) return 0.42;
+  if (width < 768) return 0.5;
+  if (width < 1024) return 0.6;
+  if (width < 1280) return 0.58;
+  if (width < 1536) return 0.64;
+  return 0.72;
+}
+
 export default function Index() {
   const location = useLocation();
   const navigate = useNavigate();
   const [data, setData] = useState<QuotationData>(() =>
-    normalizeQuotationData(loadScopedQuotation(DEFAULT_SCOPE) ?? getDefaultQuotation())
+    normalizeQuotationData(loadScopedQuotation(DEFAULT_SCOPE) ?? getDefaultQuotationForInitialMount())
   );
   const [selectedTemplate, setSelectedTemplate] = useState(() => loadScopedTemplate(DEFAULT_SCOPE) ?? 'professional');
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [previewScale, setPreviewScale] = useState(() =>
+    typeof window === 'undefined' ? 0.55 : getPreviewScale(window.innerWidth),
+  );
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>(() => loadHistory());
   const [activePdfDataUrl, setActivePdfDataUrl] = useState<string | null>(null);
-  const [productCatalogItems, setProductCatalogItems] = useState<ProductCatalogItem[]>([]);
+  const [quoteQuota, setQuoteQuota] = useState(() => getCurrentUserQuoteQuota());
+  const [productCatalogItems, setProductCatalogItems] = useState<ProductCatalogItem[]>(() =>
+    loadProductCatalogItems()
+  );
   const [editingProductCatalogId, setEditingProductCatalogId] = useState<string | null>(null);
   const [editingProductDraft, setEditingProductDraft] = useState<EditingProductDraft | null>(null);
   const [productForm, setProductForm] = useState<ProductFormState>(INITIAL_PRODUCT_FORM);
@@ -164,6 +227,27 @@ export default function Index() {
   useEffect(() => {
     saveHistory(historyEntries);
   }, [historyEntries]);
+
+  useEffect(() => {
+    saveProductCatalogItems(productCatalogItems);
+  }, [productCatalogItems]);
+
+  useEffect(() => {
+    const onResize = () => setPreviewScale(getPreviewScale(window.innerWidth));
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    setQuoteQuota(getCurrentUserQuoteQuota());
+  }, []);
+
+  useEffect(() => {
+    syncSeqFromQuotationNumber(data.quotationNumber);
+    // Align persisted sequence once with the initial loaded or generated quotation #.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (handledEmailPayloadRef.current) return;
@@ -238,6 +322,15 @@ export default function Index() {
 
   const handleDownloadPdf = async () => {
     if (!previewRef.current) return;
+
+    const usageResult = incrementQuoteGenerationForCurrentUser();
+    if (!usageResult.ok) {
+      toast({ title: 'Download blocked', description: usageResult.error, variant: 'destructive' });
+      setQuoteQuota(getCurrentUserQuoteQuota());
+      return;
+    }
+    setQuoteQuota(getCurrentUserQuoteQuota());
+
     const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import('html2canvas'), import('jspdf')]);
     const exportRoot = previewRef.current.cloneNode(true) as HTMLDivElement;
     exportRoot.style.position = 'fixed';
@@ -288,6 +381,7 @@ export default function Index() {
         pdf.addImage(imgData, 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
       }
       pdf.save(`${data.quotationNumber}.pdf`);
+      syncSeqFromQuotationNumber(data.quotationNumber);
       const pdfDataUrl = pdf.output('datauristring');
       const newHistoryEntry: HistoryEntry = {
         id: crypto.randomUUID(),
@@ -363,25 +457,8 @@ export default function Index() {
     };
 
     setProductCatalogItems(prev => [item, ...prev]);
-    update('products', [
-      ...data.products,
-      {
-        id: crypto.randomUUID(),
-        name: item.productName,
-        description: item.productDescription,
-        quantity: item.quantity,
-        unitPrice: item.unitPrice,
-        total: item.quantity * item.unitPrice,
-        customValues: {
-          material: item.productMaterial,
-          productId: item.productId,
-          productCatalogId: item.id,
-        },
-      },
-    ]);
-
     setProductForm(INITIAL_PRODUCT_FORM);
-    toast({ title: 'Product added', description: 'Product added to product tab and quotation items.' });
+    toast({ title: 'Product added', description: 'Product saved in product list for quick suggestions.' });
   };
 
   const handleEditProductCatalogItem = (item: ProductCatalogItem) => {
@@ -527,7 +604,7 @@ export default function Index() {
             <SidebarMenu className="gap-2">
               <SidebarMenuItem>
                 <SidebarMenuButton
-                  className="h-10 rounded-lg px-3"
+                  className="h-10 rounded-lg px-2"
                   isActive={activeSidebarSection === 'generate-quote'}
                   tooltip="Generate Quote"
                   onClick={() => handleSidebarNavigation('generate-quote')}
@@ -538,7 +615,7 @@ export default function Index() {
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton
-                  className="h-10 rounded-lg px-3"
+                  className="h-10 rounded-lg px-2"
                   isActive={activeSidebarSection === 'quotation-history'}
                   tooltip="Quotation History"
                   onClick={() => handleSidebarNavigation('quotation-history')}
@@ -549,7 +626,7 @@ export default function Index() {
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton
-                  className="h-10 rounded-lg px-3"
+                  className="h-10 rounded-lg px-2"
                   isActive={activeSidebarSection === 'product-tab'}
                   tooltip="Product Tab"
                   onClick={() => handleSidebarNavigation('product-tab')}
@@ -581,11 +658,14 @@ export default function Index() {
         </SidebarFooter>
       </Sidebar>
 
-      <SidebarInset className="overflow-x-hidden bg-background">
+      <SidebarInset className="min-w-0 overflow-x-hidden bg-background">
         {/* Top Bar */}
         <header className="sticky top-0 z-40 border-b border-border bg-card px-4 py-3 shadow-sm">
           <div className="flex items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-3">
+            <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+              <div className="md:hidden">
+                <SidebarTrigger />
+              </div>
               <h1 className="truncate text-lg font-bold text-foreground">
                 {isQuoteRoute ? 'Generate Quote' : isHistoryRoute ? 'Quotation History' : 'Product Tab'}
               </h1>
@@ -615,7 +695,7 @@ export default function Index() {
               <Button variant="outline" size="sm" onClick={handleReset}>
                 <RotateCcw className="h-4 w-4 mr-1" /> Reset
               </Button>
-              <Button size="sm" onClick={handleDownloadPdf}>
+              <Button size="sm" onClick={handleDownloadPdf} disabled={!quoteQuota.canGenerate}>
                 <Download className="h-4 w-4 mr-1" /> Download PDF
               </Button>
             </div>}
@@ -655,22 +735,33 @@ export default function Index() {
                   <Button variant="outline" onClick={handleReset} className="justify-start">
                     <RotateCcw className="mr-2 h-4 w-4" /> Reset
                   </Button>
-                  <Button onClick={handleDownloadPdf} className="w-fit justify-start">
+                  <Button onClick={handleDownloadPdf} className="w-fit justify-start" disabled={!quoteQuota.canGenerate}>
                     <Download className="mr-2 h-4 w-4" /> Download PDF
                   </Button>
                 </div>
               </div>
             </div>
           )}
+
+          {isQuoteRoute && quoteQuota.limit !== Number.POSITIVE_INFINITY && (
+            <div className="mt-3 text-xs text-muted-foreground">
+              Quote usage: {quoteQuota.used}/{quoteQuota.limit} used, {quoteQuota.remaining} remaining.
+            </div>
+          )}
         </header>
 
         {isQuoteRoute && (
           <div className="flex flex-col lg:flex-row">
-            <div className="lg:w-1/2 xl:w-[45%] p-4 lg:p-6 space-y-6 lg:h-[calc(100vh-57px)] lg:overflow-y-auto">
-              <div className="grid grid-cols-3 gap-3">
+            <div className="space-y-6 p-3 sm:p-4 lg:h-[calc(100vh-57px)] lg:w-1/2 lg:overflow-y-auto lg:p-6 xl:w-[45%]">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <div className="space-y-1">
                   <Label className="text-xs text-muted-foreground">Quotation #</Label>
-                  <Input value={data.quotationNumber} onChange={e => update('quotationNumber', e.target.value)} className="font-mono text-sm" />
+                  <Input
+                    value={data.quotationNumber}
+                    onChange={e => update('quotationNumber', e.target.value)}
+                    onBlur={e => syncSeqFromQuotationNumber(e.target.value)}
+                    className="font-mono text-sm"
+                  />
                 </div>
                 <div className="space-y-1">
                   <Label className="text-xs text-muted-foreground">Date</Label>
@@ -692,13 +783,20 @@ export default function Index() {
                 <ProductTable
                   products={data.products}
                   lineItemColumns={data.lineItemColumns}
+                  productSuggestions={productCatalogItems.map(item => ({
+                    productName: item.productName,
+                    productId: item.productId,
+                    productDescription: item.productDescription,
+                    productMaterial: item.productMaterial,
+                    unitPrice: item.unitPrice,
+                  }))}
                   onProductsChange={p => update('products', p)}
                   onColumnsChange={c => update('lineItemColumns', c)}
                 />
               </div>
 
               <div className="flex justify-end">
-                <div className="w-64 space-y-2">
+                <div className="w-full space-y-2 sm:w-64">
                   <div className="grid grid-cols-2 gap-2">
                     <div className="space-y-1">
                       <Label className="text-xs text-muted-foreground">Discount ($)</Label>
@@ -746,15 +844,15 @@ export default function Index() {
               </div>
             </div>
 
-            <div className="lg:w-1/2 xl:w-[55%] bg-muted/50 border-l border-border lg:h-[calc(100vh-57px)] overflow-auto p-4 lg:p-6">
+            <div className="border-t border-border bg-muted/50 p-3 sm:p-4 lg:h-[calc(100vh-57px)] lg:w-1/2 lg:overflow-auto lg:border-l lg:border-t-0 lg:p-6 xl:w-[55%]">
               <div className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Live Preview</div>
               <div className="flex justify-center overflow-x-auto">
                 <div
                   className="origin-top"
                   style={{
-                    transform: 'scale(0.55)',
+                    transform: `scale(${previewScale})`,
                     transformOrigin: 'top center',
-                    width: '181.8%',
+                    width: `${100 / previewScale}%`,
                   }}
                 >
                   <QuotationPreview ref={previewRef} data={data} templateId={selectedTemplate} />
@@ -765,7 +863,7 @@ export default function Index() {
         )}
 
         {isHistoryRoute && (
-          <div className="p-4 lg:p-6">
+          <div className="p-3 sm:p-4 lg:p-6">
             <div className="space-y-3 rounded-lg border border-border bg-card p-4">
               <h2 className="text-sm font-semibold uppercase tracking-wider text-foreground">Quotation History</h2>
               <div className="overflow-x-auto rounded-md border border-border">
@@ -807,7 +905,7 @@ export default function Index() {
         )}
 
         {isProductsRoute && (
-          <div className="p-4 lg:p-6">
+          <div className="p-3 sm:p-4 lg:p-6">
             <div className="space-y-4 rounded-lg border border-border bg-card p-4">
               <h2 className="text-sm font-semibold uppercase tracking-wider text-foreground">Product Tab</h2>
               <div className="grid gap-3 md:grid-cols-2">
@@ -1048,17 +1146,15 @@ export default function Index() {
       </SidebarInset>
 
       <Dialog open={!!activePdfDataUrl} onOpenChange={open => !open && setActivePdfDataUrl(null)}>
-        <DialogContent className="h-[90vh] max-w-6xl p-0">
-          <DialogHeader className="border-b border-border px-6 py-4">
+        <DialogContent className="flex h-[94vh] w-[96vw] max-w-[96vw] flex-col gap-0 overflow-hidden p-0">
+          <DialogHeader className="shrink-0 border-b border-border px-4 py-3">
             <DialogTitle>Quote PDF Viewer</DialogTitle>
             <DialogDescription>Preview the selected quotation PDF from history.</DialogDescription>
           </DialogHeader>
           {activePdfDataUrl ? (
-            <iframe
-              src={activePdfDataUrl}
-              title="Quote PDF Viewer"
-              className="h-full w-full rounded-b-lg border-0"
-            />
+            <div className="min-h-0 flex-1">
+              <iframe src={activePdfDataUrl} title="Quote PDF Viewer" className="h-full w-full border-0" />
+            </div>
           ) : null}
         </DialogContent>
       </Dialog>
