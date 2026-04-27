@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -11,9 +11,15 @@ import { getCurrentUser, isAdminSession } from "./utils/authStorage";
 
 const queryClient = new QueryClient();
 
+const HomeToQuote = () => {
+  const { search, hash } = useLocation();
+  return <Navigate to={{ pathname: "/quote", search, hash }} replace />;
+};
+
 const ProtectedRoute = ({ children }: { children: JSX.Element }) => {
   const user = getCurrentUser();
-  if (!user) return <Navigate to="/auth" replace />;
+  const { search, hash } = useLocation();
+  if (!user) return <Navigate to={{ pathname: "/auth", search, hash }} replace />;
   return children;
 };
 
@@ -50,7 +56,7 @@ const App = () => (
             path="/"
             element={
               <ProtectedRoute>
-                <Navigate to="/quote" replace />
+                <HomeToQuote />
               </ProtectedRoute>
             }
           />

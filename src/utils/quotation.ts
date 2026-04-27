@@ -219,6 +219,7 @@ export interface ParsedLine {
   description: string;
   raw: string;
   confident: boolean;
+  attributes?: Record<string, string>;
 }
 
 export interface ParseResult {
@@ -228,7 +229,294 @@ export interface ParseResult {
   notes: string;
   clientName: string;
   clientCompany: string;
+  dynamicColumns?: string[];
 }
+
+const NON_PRODUCT_LINE_RE =
+  /^(?:hi\b|hello\b|dear\b|regards\b|best\b|thanks?\b|subject:|from:|to:|cc:|bcc:|mob(?:ile)?[:\s]|phone[:\s]|contact[:\s]|random\s+non-item|ignore\s+please|if\s+possible\s+quote|maintenance\b|night\s+shift\b|first\s+thing\s+first\b|anyways\b|sorry\b|quick\s+ask\s+before\b|not\s+related\b|for\s+quotation\s+(?:please\s+)?consider\b|commercial\s+(?:notes|requirements)\b|ignore\s+below\b|random\s+update\s+first\b|don[’']?t\s+include\b|also\s+include:?|for\s+the\s+following\s+items:?|please\s+quote\s+for\s+the\s+following\s+items:?|we\s+request\s+your\s+best\s+quotation\b|following\s+(?:items|materials)\s+required\b|submit\s+your\s+best\s+quote\b|rohan\b|nilesh\b|priya\b|rakesh\b)/i;
+const NON_PRODUCT_PHRASE_RE =
+  /\b(?:will\s+share\s+drawing|invoice\s+mismatch|under\s+review|shutdown\s+window|quote\s+in\s+inr|lead\s+time|warranty\s+line)\b/i;
+const PRODUCT_HINT_RE =
+  /\b(?:pump|panel|sensor|transmitter|tank|strainer|hose|junction|vfd|skid|filter|valve|gauge|exchanger|regulator|receiver|kit|trap|spool|spray\s+ball)\b/i;
+const CONTINUATION_FRAGMENT_RE =
+  /^(?:(?:about|around|approx(?:\.|imately)?|total)\s+)?\d+(?:\.\d+)?\s*(?:m|mm|cm|meter|meters|ft|feet|lengths?)\b.*(?:assume|for\s+now|total|lengths?|line[s]?)\b/i;
+
+function toCleanString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function getN8nParseEndpoint(): string {
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env ?? {};
+  return (env.VITE_N8N_PARSE_WEBHOOK_URL || env.VITE_PARSE_API_URL || '').trim();
+}
+
+function toQuantity(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(1, Math.min(100000, Math.floor(parsed)));
+}
+
+function toUnitPrice(value: unknown): number {
+  const normalized = String(value ?? '')
+    .replace(/[,₹$€£]|rs\.?/gi, '')
+    .trim();
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(normalized);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.min(1_000_000_000, parsed));
+}
+
+function normalizeAttributes(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    const key = toCleanString(k);
+    const attrValue = toCleanString(v);
+    if (!key || !attrValue) continue;
+    out[key] = attrValue;
+  }
+  return out;
+}
+
+function normalizeProductKey(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function isLikelyNonProductName(name: string): boolean {
+  const cleaned = name.trim();
+  if (!cleaned) return true;
+  if (NON_PRODUCT_LINE_RE.test(cleaned)) return true;
+  if (NON_PRODUCT_PHRASE_RE.test(cleaned) && !PRODUCT_HINT_RE.test(cleaned)) return true;
+  if (!PRODUCT_HINT_RE.test(cleaned) && CONTINUATION_FRAGMENT_RE.test(cleaned)) return true;
+  if (/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(cleaned)) return true;
+  if (/^\+?\d[\d\s\-()Xx]{6,}$/.test(cleaned)) return true;
+  if (!PRODUCT_HINT_RE.test(cleaned)) {
+    const words = cleaned.split(/\s+/);
+    if (words.length <= 3 && words.every(w => /^[A-Z][a-z]+\.?$|^[A-Z]\.?$/.test(w)) && !/\d/.test(cleaned)) {
+      return true;
+    }
+  }
+  if (/^\+?\d[\d\s\-()x]{6,}$/.test(cleaned)) return true;
+  if (cleaned.split(/\s+/).length > 20) return true;
+  return false;
+}
+
+function cleanExtractedProductName(name: string): string {
+  let next = toCleanString(name);
+  next = next.replace(/^(?:also\s+quote\s+\d+\s+)/i, '');
+  next = next.replace(/^(?:we\s+need\s+\d+\s+)/i, '');
+  next = next.replace(/^(?:for\s+the\s+following\s+items:?|please\s+quote\s+for\s+the\s+following\s+items:?)\s*/i, '');
+  next = next.replace(/[-–—,]\s*(?:old\s+vendor\s+gave|but\s+don[’']?t\s+rely|if\s+budget\s+allows|final\s+confirmation\s+pending|for\s+now|include\s+in\s+quote|if\s+available\s+ex-?stock)\b.*$/gi, '');
+  next = next.replace(/[-–—,]\s*(?:likely|maybe|approx(?:\.|imately)?|about|target\s+around)\s+\d+.*$/gi, '');
+  next = next.replace(/[-–—,]\s*(?:include|need|require|want|qty|quantity|target|around|approx(?:\.|imately)?|expected|budget|maybe|likely|assume|keep|final)\b.*$/gi, '');
+  next = next.replace(/\b(?:include|need|require|want|keep|final)\s+\d{1,4}\s*(?:nos?|units?|pcs|pieces?|sets?|lines?|lengths?|panels?|valves?)\b.*$/gi, '');
+  next = next.replace(/\b(?:target|around|approx(?:\.|imately)?|expected|budget)\s*(?:inr|usd|rs\.?)?\s*[\d,]+(?:\.\d+)?\b.*$/gi, '');
+  next = next.replace(/\bwith\s+tc\s+en\b/gi, 'with TC ends');
+  next = next.replace(/\s+[-–—]\s*(?:we|include|only)\.?$/i, '');
+  next = next.replace(/\s+(?:include|target)\s*$/i, '');
+  next = next.replace(/\s{2,}/g, ' ').trim();
+  next = next.replace(/[\s,;:.!-]+$/g, '').trim();
+  return next;
+}
+
+function shouldSplitDescriptionAsProduct(description: string): boolean {
+  const d = toCleanString(description);
+  if (!d) return false;
+  if (!PRODUCT_HINT_RE.test(d)) return false;
+  if (ATTR_PREFIXES.test(d) && !PRODUCT_HINT_RE.test(d)) return false;
+  if (NON_PRODUCT_LINE_RE.test(d)) return false;
+  if (NON_PRODUCT_PHRASE_RE.test(d) && !PRODUCT_HINT_RE.test(d)) return false;
+  return extractQty(d) !== null || extractPrice(d) !== null;
+}
+
+async function tryParseEmailFromN8n(text: string): Promise<ParseResult | null> {
+  const endpoint = getN8nParseEndpoint();
+  if (!endpoint) return null;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+
+    const payload = (await response.json()) as ParseResult;
+    if (!payload || !Array.isArray(payload.parsed)) return null;
+
+    return {
+      ...payload,
+      parsed: payload.parsed
+        .filter(item => !isLikelyNonProductName(String(item?.name || '')))
+        .map(item => {
+          const qtyEvidence = [item.name, item.raw, item.description]
+            .map(v => toCleanString(v))
+            .filter(Boolean)
+            .join(' ');
+          return {
+            ...(item as ParsedLine),
+            ...item,
+            name: toCleanString(item.name),
+            quantity: Math.max(toQuantity(item.quantity), extractQty(qtyEvidence) ?? 1),
+            unitPrice: toUnitPrice(item.unitPrice),
+            confident: Boolean(item.confident),
+            attributes: normalizeAttributes((item as ParsedLine).attributes),
+          };
+        }),
+      unparsed: Array.isArray(payload.unparsed) ? payload.unparsed : [],
+      deliveryInstructions: toCleanString(payload.deliveryInstructions),
+      notes: toCleanString(payload.notes),
+      clientName: toCleanString(payload.clientName),
+      clientCompany: toCleanString(payload.clientCompany),
+      dynamicColumns: Array.isArray(payload.dynamicColumns)
+        ? payload.dynamicColumns.map(toCleanString).filter(Boolean)
+        : [],
+    };
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function sanitizeParsedProducts(parsed: ParsedLine[]): ParsedLine[] {
+  const seen = new Set<string>();
+  const out: ParsedLine[] = [];
+  const pushUnique = (item: ParsedLine) => {
+    const key = normalizeProductKey(item.name);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push(item);
+  };
+
+  for (const item of parsed) {
+    const sourceText = [item.raw, item.name, item.description]
+      .map(v => toCleanString(v))
+      .filter(Boolean)
+      .join(' ');
+    const name = cleanExtractedProductName(toCleanString(item.name));
+    if (!name || isLikelyNonProductName(name)) continue;
+    const inferredQty = extractQty(sourceText) ?? extractQty(name);
+    const base: ParsedLine = {
+      ...item,
+      name,
+      quantity: Math.max(toQuantity(item.quantity), inferredQty ?? 1),
+      unitPrice: toUnitPrice(item.unitPrice),
+      confident: true,
+    };
+
+    if (shouldSplitDescriptionAsProduct(base.description)) {
+      const secondName = cleanExtractedProductName(base.description);
+      if (secondName && !isLikelyNonProductName(secondName)) {
+        const primaryQty = extractQty(name) ?? 1;
+        pushUnique({ ...base, quantity: Math.max(1, primaryQty), description: '' });
+
+        const secondQty = extractQty(base.description) ?? 1;
+        const secondPrice = extractPrice(base.description) ?? 0;
+        pushUnique({
+          ...base,
+          name: secondName,
+          quantity: Math.max(1, secondQty),
+          unitPrice: Math.max(base.unitPrice, secondPrice),
+          description: '',
+          raw: base.description,
+        });
+        continue;
+      }
+    }
+
+    pushUnique(base);
+  }
+  return out;
+}
+
+function reconcileWithDeterministicSignals(
+  aiParsed: ParsedLine[],
+  deterministicParsed: ParsedLine[],
+): ParsedLine[] {
+  if (!aiParsed.length || !deterministicParsed.length) return aiParsed;
+  const deterministicByKey = new Map<string, ParsedLine>();
+  for (const item of deterministicParsed) {
+    const key = normalizeProductKey(item.name);
+    if (!key) continue;
+    deterministicByKey.set(key, item);
+  }
+
+  return aiParsed.map(item => {
+    const key = normalizeProductKey(toCleanString(item.name));
+    const fallback = key ? deterministicByKey.get(key) : undefined;
+    if (!fallback) return item;
+
+    const aiQty = toQuantity(item.quantity);
+    const fallbackQty = toQuantity(fallback.quantity);
+    const aiPrice = toUnitPrice(item.unitPrice);
+    const fallbackPrice = toUnitPrice(fallback.unitPrice);
+
+    return {
+      ...item,
+      quantity: aiQty <= 1 && fallbackQty > 1 ? fallbackQty : aiQty,
+      unitPrice: aiPrice <= 0 && fallbackPrice > 0 ? fallbackPrice : aiPrice,
+      raw: toCleanString(item.raw || fallback.raw || item.name),
+    };
+  });
+}
+
+const PRODUCT_MATCH_STOPWORDS = new Set([
+  'inch', 'mm', 'cm', 'm', 'hp', 'kw', 'bar', 'psi', 'ss', 'cs', 'ip', 'ex', 'pn', 'nos', 'qty',
+  'quantity', 'unit', 'units', 'piece', 'pieces', 'set', 'sets', 'length', 'lengths', 'with', 'and',
+  'for', 'the', 'each', 'model', 'type',
+]);
+
+function toMatchTokens(name: string): string[] {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter(token => /[a-z]/.test(token))
+    .filter(token => token.length >= 3)
+    .filter(token => !PRODUCT_MATCH_STOPWORDS.has(token))
+    .slice(0, 3);
+}
+
+function inferQtyFromSourceContext(name: string, sourceText: string): number | null {
+  const tokens = toMatchTokens(name);
+  if (!tokens.length) return null;
+  const lines = normalizeEmailLines(sourceText);
+  let best: number | null = null;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].toLowerCase();
+    const tokenMatchCount = tokens.filter(token => line.includes(token)).length;
+    if (tokenMatchCount < Math.min(2, tokens.length)) continue;
+
+    const nearText = `${lines[i] || ''} ${lines[i + 1] || ''} ${lines[i - 1] || ''}`.trim();
+    const inferred = extractQty(nearText);
+    if (inferred !== null) {
+      best = best === null ? inferred : Math.max(best, inferred);
+    }
+  }
+
+  return best;
+}
+
+function reconcileQuantitiesFromSource(parsed: ParsedLine[], sourceText: string): ParsedLine[] {
+  return parsed.map(item => {
+    const inferred = inferQtyFromSourceContext(item.name, sourceText);
+    if (inferred === null) return item;
+    return {
+      ...item,
+      quantity: Math.max(toQuantity(item.quantity), inferred),
+    };
+  });
+}
+
+export const __testHooks = {
+  reconcileWithDeterministicSignals,
+  inferQtyFromSourceContext,
+};
 
 // ─── Noise / meta detection ─────────────────────────────────────
 const GREETING_RE = /^(hi|hello|hey|dear|good\s+(morning|afternoon|evening))\b/i;
@@ -236,6 +524,9 @@ const SIGN_OFF_RE = /^(regards|best|cheers|thanks|thank\s*you|sincerely|warm\s+r
 const EMAIL_HEADER_RE = /^(from|to|cc|bcc|subject|date|sent|received):/i;
 const PURE_INSTRUCTION_RE = /^(please\s+(note|ensure|mention|include|review|check|confirm)|kindly|note[:\s]|let\s+me\s+know|looking\s+forward|if\s+any\s+clarification|do\s+let|we\s+(need|require|want|would\s+like)\s+(a\s+)?quotation|do\s+not\s+repeat|please\s+read)/i;
 const INSTRUCTION_KEYWORD_RE = /^(also\s+include|please\s+(note|ensure|mention|include|review|check|confirm)|kindly|note[:\s]|let\s+me\s+know|looking\s+forward|if\s+any\s+clarification|do\s+let|we\s+(need|require|want|would\s+like)\s+(a\s+)?quotation|do\s+not\s+repeat|please\s+read)/i;
+/** Titles that look like a cover line, not a line item, when the block has no qty/price. */
+const EMAIL_NARRATION_TITLE_RE =
+  /^(?:please\s+(?:share|do\s+not|find|revert|see|confirm|review|note)(?:\s|$)|contact\s+person|company:|random\s+non-item|regards\b|best\b|thanks?\b|if\s+possible\s+quote|maintenance\b|mob(?:ile)?[:\s]|first\s+thing\s+first\b|anyways\b|don[’']?t\s+include\b|also\s+include:?|we\s+request\s+your\s+best\s+quotation\b|submit\s+your\s+best\s+quote\b|following\s+(?:items|materials)\s+required\b|rohan\b|nilesh\b|priya\b|rakesh\b)/i;
 // Prefixes on lines that ARE products but have instructional lead-ins
 const PRODUCT_PREFIX_RE = /^(also\s+(?:add|looking\s+for|need|require|want|include)[:\s]*|we\s+(?:also\s+)?(?:need|require|want)[:\s]*|additionally[:\s]*|in\s+addition[:\s]*|please\s+(?:also\s+)?(?:add|quote|include)[:\s]*)/i;
 const DELIVERY_RE = /\b(deliver|delivery|shipping|ship|dispatch|timeline|lead\s+time|turnaround|weeks?|days?)\b/i;
@@ -250,10 +541,13 @@ const QTY_WORD_MAP: Record<string, number> = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
 };
 const QTY_WORD_RE = /(?:qty|quantity)[:\-=\s]*(one|two|three|four|five|six|seven|eight|nine|ten)\b/i;
-const QTY_INLINE_RE = /(\d+)\s*(?:nos?|units?|pcs|pieces?|numbers?)\b/i;
-const QTY_X_RE = /[x×]\s*(\d+)/i;
+const QTY_INLINE_RE = /(\d+)\s*(?:nos?|units?|pcs|pieces?|numbers?|lengths?|lines?|sets?|panels?|valves?|kits?)\b/i;
+const QTY_X_RE = /\b(?:x|×)\s*(\d{1,4})\b/i;
+const QTY_ACTION_NUMBER_RE = /\b(?:need|require|want|include|do|likely|maybe|assume|quote)\s+(\d{1,4})(?!\s*(?:days?|weeks?|months?|years?))\b/i;
 // Range qty: "3 or maybe 4" / "3 or 4" → pick first number
 const QTY_RANGE_RE = /(\d+)\s*(?:or\s+(?:maybe\s+)?(\d+))\s*(?:nos?|units?|pcs|pieces?|numbers?)?\b/i;
+const QTY_BREAK_INTO_RE = /\bbreak\s+into\s+(\d{1,4})\b/i;
+const QTY_PRIORITY_OVERRIDE_RE = /\b(?:keep|final(?:ly)?|final\s+qty|use)\s*(?:maybe\s*)?(\d{1,4})\b/gi;
 
 const PRICE_PATTERNS = [
   /(?:budget)[:\-=\s]*(?:USD|\$|€|£|₹|Rs\.?)?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:-|–|to)\s*(?:USD|\$|€|£|₹|Rs\.?)?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:USD|dollars?)?/i,
@@ -264,7 +558,7 @@ const PRICE_PATTERNS = [
   /(?:budget)[:\-=\s]*(?:around|approx\.?|approximately|about|roughly|~)?\s*(?:USD|\$|€|£|₹|Rs\.?)?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:USD|dollars?)?/i,
 ];
 
-const ATTR_PREFIXES = /^(moc|material|size|spec|specification|design\s*code|capacity|type|model|grade|finish|standard|code|rating|pressure|temperature|diameter|dia|length|width|height|weight|thickness|volume|flow|power|voltage)[:\-=\s]/i;
+const ATTR_PREFIXES = /^(moc|material|size|spec|specification|design\s*code|capacity|type|model|grade|finish|standard|code|rating|pressure|temperature|diameter|dia|length|width|height|weight|thickness|volume|flow|power|voltage|qty|quantity|price|unit\s*price|target\s*price)[:\-=\s]/i;
 
 // Header-only labels (no values, just column headers)
 const STANDALONE_LABEL_RE = /^\s*(?:qty|quantity|price|cost|rate|amount|total|subtotal|unit\s*price|s\.?\s*no\.?|sr\.?\s*no\.?|sl\.?\s*no\.?|item|description|particular|remarks?|name|product\s*name)\s*$/i;
@@ -279,6 +573,30 @@ function isNoiseLine(line: string): boolean {
   if (EMAIL_HEADER_RE.test(line)) return true;
   if (line.length < 3) return true;
   return false;
+}
+
+function normalizeEmailLines(text: string): string[] {
+  const base = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const expanded: string[] = [];
+  for (const line of base) {
+    const parts = line.split(';').map(p => p.trim()).filter(Boolean);
+    if (parts.length <= 1) {
+      expanded.push(line);
+      continue;
+    }
+    expanded.push(parts[0]);
+    for (let i = 1; i < parts.length; i++) {
+      const part = parts[i];
+      if (PRODUCT_HINT_RE.test(part)) {
+        expanded.push(part);
+      } else if (expanded.length > 0) {
+        expanded[expanded.length - 1] = `${expanded[expanded.length - 1]}; ${part}`.trim();
+      } else {
+        expanded.push(part);
+      }
+    }
+  }
+  return expanded;
 }
 
 /**
@@ -311,7 +629,7 @@ function isQtyOrPriceLine(line: string): boolean {
 function isProductTitle(line: string): boolean {
   // Reject lines that are purely qty/price expressions
   if (isQtyOrPriceLine(line)) return false;
-  if (ATTR_PREFIXES.test(line)) return false;
+  if (ATTR_PREFIXES.test(line) && !PRODUCT_HINT_RE.test(line)) return false;
   // Pure instructions with no product content
   if (PURE_INSTRUCTION_RE.test(line) && !extractQty(line) && !extractPrice(line)) return false;
   if (DELIVERY_RE.test(line) && !extractQty(line) && !extractPrice(line)) return false;
@@ -342,7 +660,17 @@ function isProductTitle(line: string): boolean {
 }
 
 function extractQty(text: string): number | null {
-  let m = text.match(QTY_RE);
+  // Priority overrides: "keep 3", "final 5", "use 2"
+  const priorityMatches = Array.from(text.matchAll(QTY_PRIORITY_OVERRIDE_RE));
+  if (priorityMatches.length > 0) {
+    const last = priorityMatches[priorityMatches.length - 1];
+    if (last?.[1]) return parseInt(last[1]);
+  }
+
+  let m = text.match(QTY_BREAK_INTO_RE);
+  if (m) return parseInt(m[1]);
+
+  m = text.match(QTY_RE);
   if (m) return parseInt(m[1]);
 
   // Reverse pattern: "2 qty" / "2 quantity"
@@ -372,6 +700,10 @@ function extractQty(text: string): number | null {
 
   // "Also add 1 Reactor Vessel" / "add 3 pumps" — small number after instruction prefix
   m = text.match(/(?:also\s+)?(?:add|need|require|want|include)\s+(\d{1,2})\s+[A-Z]/i);
+  if (m) return parseInt(m[1]);
+
+  // "target around ... need 3" / "so do 2 units"
+  m = text.match(QTY_ACTION_NUMBER_RE);
   if (m) return parseInt(m[1]);
 
   return null;
@@ -484,8 +816,14 @@ function blockToProduct(block: RawBlock): ParsedLine | null {
     }
   }
 
-  // Must have at least qty or price to be a valid product
-  if (qty === null && price === null) return null;
+  // When there is no qty/price, only import as a product if this block plausibly lists an item
+  // (not a narrative line like "Please share your quotation" or "Contact person: ...").
+  if (qty === null && price === null) {
+    const t = block.titleLine.trim();
+    if (EMAIL_NARRATION_TITLE_RE.test(t)) {
+      return null;
+    }
+  }
 
   // ── Clean product name ──────────────────────────────────────────
   let name = block.titleLine;
@@ -557,12 +895,16 @@ function blockToProduct(block: RawBlock): ParsedLine | null {
   // Verify the cleaned name is a real product name
   if (!name || name.length < 2 || isQtyOrPriceLine(name)) return null;
 
+  // If the block looked like a product but had no explicit qty/price, still import it
+  // (common in enquiry emails that only list product names or descriptions).
+  const finalQty = qty ?? 1;
+  const finalPrice = price;
   const confident = qty !== null && price !== null;
 
   return {
     name,
-    quantity: qty,
-    unitPrice: price,
+    quantity: finalQty,
+    unitPrice: finalPrice,
     description: descParts.join('; '),
     raw: allText,
     confident,
@@ -570,7 +912,7 @@ function blockToProduct(block: RawBlock): ParsedLine | null {
 }
 
 export function parseEmailContent(text: string): ParseResult {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = normalizeEmailLines(text);
   const { blocks, meta } = groupIntoBlocks(lines);
 
   const parsed: ParsedLine[] = [];
@@ -622,6 +964,41 @@ export function parseEmailContent(text: string): ParseResult {
     notes: noteLines.join('\n'),
     clientName,
     clientCompany,
+  };
+}
+
+/**
+ * n8n-first parser: POST email text to `VITE_N8N_PARSE_WEBHOOK_URL` (or `VITE_PARSE_API_URL` alias),
+ * then falls back to the deterministic local parser if n8n is unset, unreachable, or returns no products.
+ */
+export async function parseEmailContentSmart(text: string): Promise<ParseResult> {
+  const deterministicParsed = sanitizeParsedProducts(
+    parseEmailContent(text).parsed.map(item => ({
+      ...item,
+      quantity: item.quantity ?? 1,
+      unitPrice: item.unitPrice ?? 0,
+    })),
+  );
+
+  const n8nResult = await tryParseEmailFromN8n(text);
+  if (n8nResult?.parsed?.length) {
+    const merged = sanitizeParsedProducts(
+      reconcileWithDeterministicSignals(n8nResult.parsed, deterministicParsed),
+    );
+    return {
+      ...n8nResult,
+      parsed: reconcileQuantitiesFromSource(merged, text),
+    };
+  }
+
+  const fallback = parseEmailContent(text);
+  return {
+    ...fallback,
+    parsed: deterministicParsed,
+    notes: [fallback.notes, 'N8n parse unavailable; used local extraction.']
+      .filter(Boolean)
+      .join('\n')
+      .trim(),
   };
 }
 

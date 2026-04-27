@@ -49,12 +49,12 @@ import {
   calculateTax,
   calculateGrandTotal,
   formatCurrency,
-  parseEmailContent,
+  parseEmailContentSmart,
   parsedLinesToProducts,
   syncSeqFromQuotationNumber,
 } from '@/utils/quotation';
 import { loadScopedQuotation, loadScopedTemplate, saveScopedQuotation, saveScopedTemplate } from '@/utils/scopedStorage';
-import type { QuotationData, ProductItem } from '@/types/quotation';
+import type { LineItemColumn, QuotationData, ProductItem } from '@/types/quotation';
 import { TEMPLATES } from '@/types/quotation';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -66,6 +66,7 @@ import {
 
 const DEFAULT_SCOPE = 'default';
 const EMAIL_PAYLOAD_QUERY_KEY = 'email_payload';
+const PARSED_PAYLOAD_QUERY_KEY = 'parsed_payload';
 const APP_LOGO_SRC = '/quotegen-logo.svg';
 const QUOTATION_HISTORY_KEY = 'quotegen:v1:quotation-history';
 const PRODUCT_CATALOG_KEY = 'quotegen:v1:product-catalog';
@@ -166,6 +167,66 @@ interface EmailPayload {
   body?: string;
 }
 
+interface ParsedPayloadEnvelope {
+  email?: EmailPayload;
+  parsedResult?: Awaited<ReturnType<typeof parseEmailContentSmart>>;
+}
+
+function normalizeDynamicColumnLabel(label: string): string {
+  const cleaned = label.trim().replace(/\s+/g, ' ');
+  if (!cleaned) return '';
+  return cleaned
+    .split(' ')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function buildProductsAndColumnsFromParse(
+  result: Awaited<ReturnType<typeof parseEmailContentSmart>>,
+  previousColumns: LineItemColumn[],
+): { products: ProductItem[]; lineItemColumns: LineItemColumn[] } {
+  const parsedProducts = parsedLinesToProducts(result.parsed.filter(p => p.name));
+  const declaredColumns = (result.dynamicColumns ?? []).map(normalizeDynamicColumnLabel).filter(Boolean);
+  const inferredColumns = Array.from(
+    new Set(
+      result.parsed.flatMap(item =>
+        Object.keys(item.attributes ?? {}).map(normalizeDynamicColumnLabel).filter(Boolean),
+      ),
+    ),
+  );
+  const desiredLabels = Array.from(new Set([...declaredColumns, ...inferredColumns]));
+
+  const existingCustomByLabel = new Map(
+    previousColumns
+      .filter(col => col.role === 'custom')
+      .map(col => [col.label.trim().toLowerCase(), col] as const),
+  );
+
+  const customColumns = desiredLabels.map(label => {
+    const existing = existingCustomByLabel.get(label.toLowerCase());
+    return existing ?? { id: crypto.randomUUID(), role: 'custom' as const, label };
+  });
+  const customByLabel = new Map(customColumns.map(col => [col.label.trim().toLowerCase(), col.id] as const));
+
+  const mappedProducts = parsedProducts.map((product, idx) => {
+    const attrs = result.parsed[idx]?.attributes ?? {};
+    const customValues: Record<string, string> = {};
+    for (const [rawKey, rawValue] of Object.entries(attrs)) {
+      const key = normalizeDynamicColumnLabel(rawKey).toLowerCase();
+      const columnId = customByLabel.get(key);
+      if (!columnId) continue;
+      customValues[columnId] = String(rawValue).trim();
+    }
+    return { ...product, customValues };
+  });
+
+  const nextColumns = [
+    ...previousColumns.filter(col => col.role !== 'custom'),
+    ...customColumns,
+  ];
+  return { products: mappedProducts, lineItemColumns: nextColumns };
+}
+
 function getPreviewScale(width: number): number {
   if (width < 480) return 0.36;
   if (width < 640) return 0.42;
@@ -199,6 +260,7 @@ export default function Index() {
   const [productForm, setProductForm] = useState<ProductFormState>(INITIAL_PRODUCT_FORM);
   const previewRef = useRef<HTMLDivElement>(null);
   const handledEmailPayloadRef = useRef(false);
+  const handledMessagePayloadRef = useRef(false);
   const { toast } = useToast();
 
   const update = <K extends keyof QuotationData>(key: K, value: QuotationData[K]) =>
@@ -254,35 +316,110 @@ export default function Index() {
 
     const params = new URLSearchParams(window.location.search);
     const encodedPayload = params.get(EMAIL_PAYLOAD_QUERY_KEY);
-    if (!encodedPayload) return;
+    const encodedParsedPayload = params.get(PARSED_PAYLOAD_QUERY_KEY);
+    if (!encodedPayload && !encodedParsedPayload) return;
 
     handledEmailPayloadRef.current = true;
 
     const clearQueryParam = () => {
       params.delete(EMAIL_PAYLOAD_QUERY_KEY);
+      params.delete(PARSED_PAYLOAD_QUERY_KEY);
       const nextQuery = params.toString();
       const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`;
       window.history.replaceState({}, document.title, nextUrl);
     };
 
-    try {
-      const bytes = Uint8Array.from(atob(encodedPayload), char => char.charCodeAt(0));
-      const decoded = new TextDecoder().decode(bytes);
-      const payload = JSON.parse(decoded) as EmailPayload;
-      const body = payload.body?.trim();
+    const parseIncomingPayload = async () => {
+      try {
+        // Query strings can turn base64 '+' into spaces; fix before atob
+        const encoded = encodedParsedPayload || encodedPayload || '';
+        const base64 = encoded.replace(/ /g, '+');
+        const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0));
+        const decoded = new TextDecoder().decode(bytes);
+        const parsedEnvelope = JSON.parse(decoded) as ParsedPayloadEnvelope | EmailPayload;
+        const payload =
+          'parsedResult' in (parsedEnvelope as ParsedPayloadEnvelope) || 'email' in (parsedEnvelope as ParsedPayloadEnvelope)
+            ? ((parsedEnvelope as ParsedPayloadEnvelope).email ?? {})
+            : (parsedEnvelope as EmailPayload);
+        const body = payload.body?.trim();
+        const preParsedResult =
+          'parsedResult' in (parsedEnvelope as ParsedPayloadEnvelope)
+            ? (parsedEnvelope as ParsedPayloadEnvelope).parsedResult
+            : undefined;
 
-      if (!body) {
+        if (!body && !preParsedResult) {
+          toast({
+            title: 'No email content found',
+            description: 'The extension payload did not include compose body text.',
+            variant: 'destructive',
+          });
+          clearQueryParam();
+          return;
+        }
+
+        const result = preParsedResult ?? (await parseEmailContentSmart(body || ''));
+        const metaNote = [
+          payload.subject ? `Subject: ${payload.subject}` : '',
+          payload.to ? `To: ${payload.to}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        setData(prev => {
+          const { products, lineItemColumns } = buildProductsAndColumnsFromParse(result, prev.lineItemColumns);
+          const nextNotes = [prev.notes, result.notes, metaNote].filter(Boolean).join('\n').trim();
+          return {
+            ...prev,
+            lineItemColumns,
+            products: [...prev.products.filter(p => p.name), ...products],
+            deliveryInstructions: result.deliveryInstructions || prev.deliveryInstructions,
+            notes: nextNotes,
+            client: {
+              ...prev.client,
+              name: result.clientName || prev.client.name,
+              company: result.clientCompany || prev.client.company,
+            },
+          };
+        });
+
         toast({
-          title: 'No email content found',
-          description: 'The extension payload did not include compose body text.',
+          title: 'Quotation created from email',
+          description:
+            products.length > 0
+              ? `${products.length} line item(s) imported. ${result.parsed.some(p => p.confident === false) ? 'Review quantities and unit prices where shown as 0.' : ''}`.trim()
+              : 'No line items were parsed from the email. Check Notes or use Parse Email, then add products manually.',
+        });
+      } catch {
+        toast({
+          title: 'Invalid extension payload',
+          description: 'Could not read email data from the extension link.',
           variant: 'destructive',
         });
+      } finally {
         clearQueryParam();
+      }
+    };
+
+    void parseIncomingPayload();
+  }, [toast]);
+
+  useEffect(() => {
+    if (handledMessagePayloadRef.current) return;
+
+    const processEnvelope = async (envelope: ParsedPayloadEnvelope) => {
+      const payload = envelope.email ?? {};
+      const body = payload.body?.trim();
+      const preParsedResult = envelope.parsedResult;
+      if (!body && !preParsedResult) {
+        toast({
+          title: 'No email content found',
+          description: 'The extension payload did not include email body text.',
+          variant: 'destructive',
+        });
         return;
       }
 
-      const result = parseEmailContent(body);
-      const products = parsedLinesToProducts(result.parsed.filter(p => p.name));
+      const result = preParsedResult ?? (await parseEmailContentSmart(body || ''));
       const metaNote = [
         payload.subject ? `Subject: ${payload.subject}` : '',
         payload.to ? `To: ${payload.to}` : '',
@@ -291,9 +428,11 @@ export default function Index() {
         .join('\n');
 
       setData(prev => {
+        const { products, lineItemColumns } = buildProductsAndColumnsFromParse(result, prev.lineItemColumns);
         const nextNotes = [prev.notes, result.notes, metaNote].filter(Boolean).join('\n').trim();
         return {
           ...prev,
+          lineItemColumns,
           products: [...prev.products.filter(p => p.name), ...products],
           deliveryInstructions: result.deliveryInstructions || prev.deliveryInstructions,
           notes: nextNotes,
@@ -307,17 +446,36 @@ export default function Index() {
 
       toast({
         title: 'Quotation created from email',
-        description: `${products.length} item(s) added from Gmail compose.`,
+        description:
+          result.parsed.length > 0
+            ? `${result.parsed.length} line item(s) imported. ${result.parsed.some(p => p.confident === false) ? 'Review quantities and unit prices where shown as 0.' : ''}`.trim()
+            : 'No line items were parsed from the email. Check Notes or use Parse Email, then add products manually.',
       });
-    } catch {
-      toast({
-        title: 'Invalid extension payload',
-        description: 'Could not read email data from the extension link.',
-        variant: 'destructive',
+    };
+
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as
+        | {
+            type?: string;
+            version?: number;
+            payload?: ParsedPayloadEnvelope;
+          }
+        | undefined;
+      if (!data || data.type !== 'quotegen-extension-payload') return;
+      if (!data.payload || typeof data.payload !== 'object') return;
+      if (handledMessagePayloadRef.current) return;
+      handledMessagePayloadRef.current = true;
+      void processEnvelope(data.payload).catch(() => {
+        toast({
+          title: 'Invalid extension payload',
+          description: 'Could not read email data from the extension link.',
+          variant: 'destructive',
+        });
       });
-    } finally {
-      clearQueryParam();
-    }
+    };
+
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
   }, [toast]);
 
   const handleDownloadPdf = async () => {

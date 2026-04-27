@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { LogIn, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,7 @@ const APP_LOGO_SRC = "/quotegen-logo.svg";
 
 export default function Auth() {
   const navigate = useNavigate();
+  const { search, hash } = useLocation();
   const { toast } = useToast();
 
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -42,7 +43,7 @@ export default function Auth() {
     }
 
     toast({ title: "Welcome back", description: `Logged in as ${result.user.email}.` });
-    navigate("/", { replace: true });
+    navigate({ pathname: "/", search, hash }, { replace: true });
   };
 
   const handleSignUp = (event: FormEvent<HTMLFormElement>) => {
@@ -72,7 +73,7 @@ export default function Auth() {
     }
 
     toast({ title: "Account created", description: `Welcome, ${result.user.name}.` });
-    navigate("/", { replace: true });
+    navigate({ pathname: "/", search, hash }, { replace: true });
   };
 
   return (

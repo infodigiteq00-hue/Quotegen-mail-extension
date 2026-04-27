@@ -26,7 +26,7 @@ function getManifestJson() {
   );
 }
 
-function getReadme(appBaseUrl: string): string {
+function getReadme(appBaseUrl: string, n8nWebhookUrl: string): string {
   return `QuoteGen Mail Extension (Gmail + Outlook)
 ==========================================
 
@@ -39,13 +39,17 @@ function getReadme(appBaseUrl: string): string {
 
 On click, email details are sent to:
 ${appBaseUrl}
+
+n8n webhook (optional direct parse):
+${n8nWebhookUrl || 'Not configured'}
 `;
 }
 
-function getContentScript(appBaseUrl: string): string {
+function getContentScript(appBaseUrl: string, n8nWebhookUrl: string): string {
   return `
 (() => {
   const APP_BASE_URL = ${JSON.stringify(appBaseUrl)};
+  const N8N_WEBHOOK_URL = ${JSON.stringify(n8nWebhookUrl)};
   const hostname = window.location.hostname.toLowerCase();
   const path = window.location.pathname.toLowerCase();
   const IS_GMAIL = hostname === 'mail.google.com';
@@ -71,15 +75,80 @@ function getContentScript(appBaseUrl: string): string {
     return btoa(unescape(encodeURIComponent(json)));
   }
 
-  function openQuoteGen(payload) {
+  function openQuoteGenWindow(data) {
+    const target = APP_BASE_URL + '/quote';
+    const popup = window.open(target, '_blank', 'noopener,noreferrer');
+    if (!popup) return false;
+
+    const message = {
+      type: 'quotegen-extension-payload',
+      version: 1,
+      payload: data,
+    };
+    const targetOrigin = new URL(APP_BASE_URL).origin;
+    let attempts = 0;
+    const maxAttempts = 20;
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      try {
+        popup.postMessage(message, targetOrigin);
+      } catch (_error) {
+        // no-op; keep retrying while popup is loading
+      }
+      if (attempts >= maxAttempts || popup.closed) {
+        window.clearInterval(timer);
+      }
+    }, 250);
+    return true;
+  }
+
+  async function openQuoteGen(payload) {
     if (!payload.body) {
       alert('No email body found in this email.');
       return;
     }
 
-    const encoded = encodePayload(payload);
-    const target = APP_BASE_URL + '/?email_payload=' + encodeURIComponent(encoded);
-    window.open(target, '_blank', 'noopener,noreferrer');
+    const fallbackEncoded = encodePayload(payload);
+    const fallbackTarget = APP_BASE_URL + '/quote?email_payload=' + encodeURIComponent(fallbackEncoded);
+    const openFallback = () => {
+      if (!openQuoteGenWindow({ email: payload })) {
+        window.open(fallbackTarget, '_blank', 'noopener,noreferrer');
+      }
+    };
+
+    if (!N8N_WEBHOOK_URL) {
+      openFallback();
+      return;
+    }
+
+    try {
+      const response = await fetch(N8N_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source: payload.source || 'mail-extension',
+          provider: IS_GMAIL ? 'gmail' : IS_OUTLOOK ? 'outlook' : 'unknown',
+          subject: payload.subject || '',
+          to: payload.to || '',
+          body: payload.body || '',
+          createdAt: payload.createdAt || new Date().toISOString(),
+        }),
+      });
+
+      if (!response.ok) throw new Error('n8n request failed');
+      const parsedResult = await response.json();
+      const envelope = { email: payload, parsedResult };
+      const opened = openQuoteGenWindow(envelope);
+      if (!opened) {
+        const encoded = encodePayload(envelope);
+        const target = APP_BASE_URL + '/quote?parsed_payload=' + encodeURIComponent(encoded);
+        window.open(target, '_blank', 'noopener,noreferrer');
+      }
+      return;
+    } catch (_error) {
+      // Fall back to app-side parsing to keep one-click flow reliable.
+    }
+    openFallback();
   }
 
   function getComposeBody(composeRoot) {
@@ -154,12 +223,36 @@ function getContentScript(appBaseUrl: string): string {
   }
 
   function getReadBody(readRoot) {
-    if (!readRoot) return '';
-    const bodyNode =
-      readRoot.querySelector('div.a3s.aiL') ||
-      readRoot.querySelector('div.a3s') ||
-      readRoot.querySelector('div[dir="ltr"]');
-    return safeText(bodyNode ? bodyNode.innerText : '');
+    function fromRoot(root) {
+      if (!root) return '';
+      const bySelector =
+        root.querySelector('div[role="article"] .a3s') ||
+        root.querySelector('div.a3s.aiL') ||
+        root.querySelector('div.a3s') ||
+        root.querySelector('div.ii.gt .a3s') ||
+        root.querySelector('div[data-message-id] .a3s') ||
+        root.querySelector('div[role="gridcell"] .a3s') ||
+        root.querySelector('div[dir="ltr"].a3s') ||
+        root.querySelector('div.a3s[dir="ltr"]');
+      if (bySelector) return safeText(bySelector.innerText);
+
+      const ltrNodes = root.querySelectorAll('div[dir="ltr"]');
+      let best = '';
+      for (const node of ltrNodes) {
+        const t = safeText(node.innerText);
+        if (t.length > best.length) best = t;
+      }
+      return best;
+    }
+
+    const primary = fromRoot(readRoot);
+    if (primary) return primary;
+    // Gmail updates sometimes move body outside the message id node; fall back to main pane
+    return (
+      fromRoot(getLatestVisibleReadRoot()) ||
+      fromRoot(document.querySelector('div[role="main"]')) ||
+      safeText((document.querySelector('div[role="main"] .a3s') || document.querySelector('div[role="main"] div[dir="ltr"]') || null)?.innerText)
+    );
   }
 
   function getLatestVisibleReadRoot() {
@@ -551,13 +644,13 @@ function getContentScript(appBaseUrl: string): string {
 `;
 }
 
-export async function downloadChromeExtensionZip(appBaseUrl: string): Promise<void> {
+export async function downloadChromeExtensionZip(appBaseUrl: string, n8nWebhookUrl = ''): Promise<void> {
   const { default: JSZip } = await import('jszip');
 
   const zip = new JSZip();
   zip.file('manifest.json', getManifestJson());
-  zip.file('content.js', getContentScript(appBaseUrl));
-  zip.file('README.txt', getReadme(appBaseUrl));
+  zip.file('content.js', getContentScript(appBaseUrl, n8nWebhookUrl));
+  zip.file('README.txt', getReadme(appBaseUrl, n8nWebhookUrl));
 
   const blob = await zip.generateAsync({ type: 'blob' });
   const link = document.createElement('a');

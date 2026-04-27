@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Mail, Sparkles, Chrome, Check, AlertTriangle, Trash2, Plus, Info } from 'lucide-react';
-import { parseEmailContent, parsedLinesToProducts } from '@/utils/quotation';
+import { parseEmailContentSmart, parsedLinesToProducts } from '@/utils/quotation';
 import { downloadChromeExtensionZip } from '@/utils/chromeExtensionPack';
 import type { ProductItem } from '@/types/quotation';
 import type { ParsedLine, ParseResult } from '@/utils/quotation';
@@ -28,16 +28,22 @@ export default function EmailParser({ onProductsExtracted }: EmailParserProps) {
   const [extensionOpen, setExtensionOpen] = useState(false);
   const [step, setStep] = useState<Step>('input');
   const [isDownloadingExtension, setIsDownloadingExtension] = useState(false);
+  const [isParsing, setIsParsing] = useState(false);
   const [parsed, setParsed] = useState<ParsedLine[]>([]);
   const [unparsed, setUnparsed] = useState<string[]>([]);
   const [extras, setExtras] = useState<Omit<ParseResult, 'parsed' | 'unparsed'>>({ deliveryInstructions: '', notes: '', clientName: '', clientCompany: '' });
 
-  const handleParse = () => {
-    const result = parseEmailContent(emailText);
-    setParsed(result.parsed);
-    setUnparsed(result.unparsed);
-    setExtras({ deliveryInstructions: result.deliveryInstructions, notes: result.notes, clientName: result.clientName, clientCompany: result.clientCompany });
-    setStep('review');
+  const handleParse = async () => {
+    try {
+      setIsParsing(true);
+      const result = await parseEmailContentSmart(emailText);
+      setParsed(result.parsed);
+      setUnparsed(result.unparsed);
+      setExtras({ deliveryInstructions: result.deliveryInstructions, notes: result.notes, clientName: result.clientName, clientCompany: result.clientCompany });
+      setStep('review');
+    } finally {
+      setIsParsing(false);
+    }
   };
 
   const handleConfirm = () => {
@@ -71,7 +77,8 @@ export default function EmailParser({ onProductsExtracted }: EmailParserProps) {
   const handleExtensionDownload = async () => {
     try {
       setIsDownloadingExtension(true);
-      await downloadChromeExtensionZip(window.location.origin);
+      const n8nWebhookUrl = (import.meta.env.VITE_N8N_PARSE_WEBHOOK_URL || '').trim();
+      await downloadChromeExtensionZip(window.location.origin, n8nWebhookUrl);
     } finally {
       setIsDownloadingExtension(false);
     }
@@ -93,7 +100,7 @@ export default function EmailParser({ onProductsExtracted }: EmailParserProps) {
             </DialogTitle>
             <DialogDescription>
               {step === 'input'
-                ? 'Paste any email content below. The system will extract product names, quantities, and prices from structured blocks.'
+                ? 'Paste any email content below. AI extraction handles free-form paragraphs and mixed writing styles.'
                 : 'Review and edit the extracted data before adding to your quotation.'}
             </DialogDescription>
           </DialogHeader>
@@ -108,7 +115,9 @@ export default function EmailParser({ onProductsExtracted }: EmailParserProps) {
               />
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={handleClose}>Cancel</Button>
-                <Button onClick={handleParse} disabled={!emailText.trim()}>Extract Products</Button>
+                <Button onClick={handleParse} disabled={!emailText.trim() || isParsing}>
+                  {isParsing ? 'Extracting...' : 'Extract Products'}
+                </Button>
               </div>
             </>
           )}
